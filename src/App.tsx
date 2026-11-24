@@ -15,6 +15,23 @@ import {
 } from './components/ChessBoard'
 import { EvaluationBar } from './components/EvaluationBar'
 import { GameReviewPanel } from './components/GameReviewPanel'
+import {
+  BotTabIcon,
+  CopyIcon,
+  EngineTabIcon,
+  FirstMoveIcon,
+  FlipIcon,
+  GameTabIcon,
+  LastMoveIcon,
+  NextMoveIcon,
+  PrevMoveIcon,
+  ResetIcon,
+  ReviewTabIcon,
+  UndoIcon,
+  UploadIcon,
+  VolumeOffIcon,
+  VolumeOnIcon,
+} from './components/Icons'
 import { ImportModal, type ImportTab } from './components/ImportModal'
 import { PlayerBar } from './components/PlayerBar'
 import {
@@ -358,6 +375,7 @@ export function App() {
   const reviewAbortRef = useRef<AbortController | null>(null)
 
   const activeMoveRef = useRef<HTMLButtonElement>(null)
+  const moveListContainerRef = useRef<HTMLDivElement>(null)
 
   const displayGame = useMemo(() => {
     if (variation) {
@@ -913,9 +931,21 @@ export function App() {
     currentNumber += 1
   }
 
-  // Keep active move visible in move list
+  // Keep active move visible ONLY inside the move list container (never scroll the page/window on mobile)
   useEffect(() => {
-    activeMoveRef.current?.scrollIntoView({ block: 'nearest' })
+    const container = moveListContainerRef.current
+    const activeEl = activeMoveRef.current
+    if (!container || !activeEl) return
+
+    const containerRect = container.getBoundingClientRect()
+    const itemRect = activeEl.getBoundingClientRect()
+    const padding = 8
+
+    if (itemRect.top < containerRect.top + padding) {
+      container.scrollTop -= containerRect.top + padding - itemRect.top
+    } else if (itemRect.bottom > containerRect.bottom - padding) {
+      container.scrollTop += itemRect.bottom - (containerRect.bottom - padding)
+    }
   }, [viewIndex])
 
   // Keyboard navigation for replay (ArrowLeft / ArrowRight / ArrowUp / ArrowDown / Home / End)
@@ -1625,14 +1655,15 @@ export function App() {
             </div>
           </div>
 
-          <div className="flex shrink-0 items-center gap-1.5 sm:gap-2.5">
+          <div className="flex shrink-0 items-center gap-2 sm:gap-2.5">
             {/* Primary unified Import CTA */}
             <button
               type="button"
               onClick={() => setImportModalTab('online')}
-              className="flex items-center gap-1 rounded-lg bg-[#81b64c] px-2.5 py-1.5 text-xs font-bold text-[#161512] shadow-sm transition hover:bg-[#95c75d] sm:px-3.5 sm:py-2"
+              className="flex items-center gap-1.5 rounded-lg bg-[#81b64c] px-3 py-2 text-xs font-bold text-[#161512] shadow-sm transition hover:bg-[#95c75d] sm:px-3.5 sm:py-2"
             >
-              <span>+ Tải ván</span>
+              <UploadIcon className="h-4 w-4 shrink-0" />
+              <span>Tải ván</span>
               <span className="hidden sm:inline">/ Thế cờ</span>
             </button>
 
@@ -1659,7 +1690,7 @@ export function App() {
                         : 'text-stone-400 hover:text-stone-200',
                     ].join(' ')}
                   >
-                    <span className="grid h-3.5 w-3.5 grid-cols-2 overflow-hidden rounded-[3px] ring-1 ring-black/40 sm:h-4 sm:w-4">
+                    <span className="grid h-4 w-4 grid-cols-2 overflow-hidden rounded-[3px] ring-1 ring-black/40 sm:h-4.5 sm:w-4.5">
                       <span style={{ backgroundColor: t.light }} />
                       <span style={{ backgroundColor: t.dark }} />
                       <span style={{ backgroundColor: t.dark }} />
@@ -1678,13 +1709,17 @@ export function App() {
               title={soundEnabled ? 'Tắt âm thanh' : 'Bật âm thanh'}
               aria-label={soundEnabled ? 'Tắt âm thanh' : 'Bật âm thanh'}
               className={[
-                'flex h-8 w-8 items-center justify-center rounded-lg text-sm ring-1 transition sm:h-9 sm:w-9',
+                'flex h-9 w-9 items-center justify-center rounded-lg ring-1 transition sm:h-10 sm:w-10',
                 soundEnabled
                   ? 'bg-[#2e2c28] text-stone-100 ring-white/10 hover:bg-[#3d3a36]'
                   : 'bg-[#1a1917] text-stone-500 ring-white/5 hover:text-stone-300',
               ].join(' ')}
             >
-              {soundEnabled ? '🔊' : '🔇'}
+              {soundEnabled ? (
+                <VolumeOnIcon className="h-5 w-5" />
+              ) : (
+                <VolumeOffIcon className="h-5 w-5" />
+              )}
             </button>
           </div>
         </div>
@@ -1808,8 +1843,74 @@ export function App() {
             </div>
           </div>
 
+          {/* Mobile & Tablet touch-friendly Replay & Flip bar right under the board */}
+          <div className="flex w-full max-w-[636px] gap-1.5 sm:gap-2.5 lg:hidden">
+            <div className="w-4.5 shrink-0 sm:w-7" aria-hidden="true" />
+            <div className="grid min-w-0 flex-1 grid-cols-5 gap-1.5 rounded-xl bg-[#24221f] p-1.5 ring-1 ring-white/[0.08]">
+              <button
+                type="button"
+                onClick={stepStart}
+                disabled={!variation && viewIndex === 0}
+                title={variation ? 'Quay lại điểm rẽ nhánh' : 'Về đầu ván'}
+                aria-label="Về đầu ván"
+                className="flex min-h-[44px] touch-manipulation items-center justify-center rounded-lg bg-[#2e2c28] text-stone-100 transition active:scale-95 hover:bg-[#3d3a36] disabled:opacity-35"
+              >
+                <FirstMoveIcon className="h-5 w-5" />
+              </button>
+              <button
+                type="button"
+                onClick={stepPrev}
+                disabled={!variation && viewIndex === 0}
+                title="Nước trước"
+                aria-label="Nước trước"
+                className="flex min-h-[44px] touch-manipulation items-center justify-center rounded-lg bg-[#34312d] text-white transition active:scale-95 hover:bg-[#433f3a] disabled:opacity-35"
+              >
+                <PrevMoveIcon className="h-6 w-6" />
+              </button>
+              <button
+                type="button"
+                onClick={stepNext}
+                disabled={
+                  variation
+                    ? variation.cursor >= variation.moves.length
+                    : viewIndex >= moves.length
+                }
+                title="Nước sau"
+                aria-label="Nước sau"
+                className="flex min-h-[44px] touch-manipulation items-center justify-center rounded-lg bg-[#34312d] text-white transition active:scale-95 hover:bg-[#433f3a] disabled:opacity-35"
+              >
+                <NextMoveIcon className="h-6 w-6" />
+              </button>
+              <button
+                type="button"
+                onClick={stepEnd}
+                disabled={
+                  variation
+                    ? variation.cursor >= variation.moves.length
+                    : viewIndex >= moves.length
+                }
+                title="Về nước cuối"
+                aria-label="Về nước cuối"
+                className="flex min-h-[44px] touch-manipulation items-center justify-center rounded-lg bg-[#2e2c28] text-stone-100 transition active:scale-95 hover:bg-[#3d3a36] disabled:opacity-35"
+              >
+                <LastMoveIcon className="h-5 w-5" />
+              </button>
+              <button
+                type="button"
+                onClick={() =>
+                  setOrientation((prev) => (prev === 'w' ? 'b' : 'w'))
+                }
+                title="Xoay bàn cờ"
+                aria-label="Xoay bàn cờ"
+                className="flex min-h-[44px] touch-manipulation items-center justify-center rounded-lg bg-[#2e2c28] text-stone-200 transition active:scale-95 hover:bg-[#3d3a36]"
+              >
+                <FlipIcon className="h-5 w-5" />
+              </button>
+            </div>
+          </div>
+
           {/* Desktop-only subtle keyboard & right-click hint */}
-          <div className="hidden w-full max-w-[636px] flex-wrap items-center justify-between gap-2 pl-9 text-[11px] text-stone-500 sm:flex">
+          <div className="hidden w-full max-w-[636px] flex-wrap items-center justify-between gap-2 pl-9 text-[11px] text-stone-500 lg:flex">
             <span>
               Chuột phải: đánh dấu ô / kéo vẽ mũi tên (
               <kbd className="rounded bg-white/5 px-1 text-stone-400">
@@ -1913,63 +2014,67 @@ export function App() {
             </div>
           )}
 
-          {/* 4 Clear Sidebar Tabs */}
+          {/* 4 Clear Sidebar Tabs (Icon-over-Label, Beginner-friendly) */}
           <div className="grid grid-cols-4 gap-1 border-b border-white/[0.07] bg-[#1e1c1a] p-1.5">
             <button
               type="button"
               onClick={() => setSidebarTab('game')}
               className={[
-                'rounded-lg py-2 text-[11px] font-semibold transition sm:text-xs',
+                'flex flex-col items-center justify-center gap-1 rounded-xl py-2 text-[11px] font-semibold transition',
                 sidebarTab === 'game'
-                  ? 'bg-[#34312d] text-white shadow-xs'
-                  : 'text-stone-400 hover:text-stone-200',
+                  ? 'bg-[#34312d] text-white shadow-xs ring-1 ring-white/10'
+                  : 'text-stone-400 hover:bg-white/[0.04] hover:text-stone-200',
               ].join(' ')}
             >
-              ♟ Ván đấu
+              <GameTabIcon className="h-5 w-5" />
+              <span>Ván đấu</span>
             </button>
             <button
               type="button"
               onClick={() => setSidebarTab('bot')}
               className={[
-                'flex items-center justify-center gap-1 rounded-lg py-2 text-[11px] font-semibold transition sm:text-xs',
+                'relative flex flex-col items-center justify-center gap-1 rounded-xl py-2 text-[11px] font-semibold transition',
                 sidebarTab === 'bot'
-                  ? 'bg-[#34312d] text-white shadow-xs'
-                  : 'text-stone-400 hover:text-stone-200',
+                  ? 'bg-[#34312d] text-white shadow-xs ring-1 ring-white/10'
+                  : 'text-stone-400 hover:bg-white/[0.04] hover:text-stone-200',
               ].join(' ')}
             >
-              <span>🤖 Bot</span>
+              <BotTabIcon className="h-5 w-5" />
+              <span>Đấu Bot</span>
               {botActive && (
-                <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+                <span className="absolute top-1.5 right-2 h-2 w-2 rounded-full bg-emerald-400 ring-2 ring-[#1e1c1a]" />
               )}
             </button>
             <button
               type="button"
               onClick={() => setSidebarTab('review')}
               className={[
-                'flex items-center justify-center gap-1 rounded-lg py-2 text-[11px] font-semibold transition sm:text-xs',
+                'relative flex flex-col items-center justify-center gap-1 rounded-xl py-2 text-[11px] font-semibold transition',
                 sidebarTab === 'review'
-                  ? 'bg-[#34312d] text-white shadow-xs'
-                  : 'text-stone-400 hover:text-stone-200',
+                  ? 'bg-[#34312d] text-white shadow-xs ring-1 ring-white/10'
+                  : 'text-stone-400 hover:bg-white/[0.04] hover:text-stone-200',
               ].join(' ')}
             >
-              <span>📊 Đánh giá</span>
+              <ReviewTabIcon className="h-5 w-5" />
+              <span>Đánh giá</span>
               {reviewResult && (
-                <span className="h-1.5 w-1.5 rounded-full bg-[#81b64c]" />
+                <span className="absolute top-1.5 right-2 h-2 w-2 rounded-full bg-[#81b64c] ring-2 ring-[#1e1c1a]" />
               )}
             </button>
             <button
               type="button"
               onClick={() => setSidebarTab('engine')}
               className={[
-                'flex items-center justify-center gap-1 rounded-lg py-2 text-[11px] font-semibold transition sm:text-xs',
+                'relative flex flex-col items-center justify-center gap-1 rounded-xl py-2 text-[11px] font-semibold transition',
                 sidebarTab === 'engine'
-                  ? 'bg-[#34312d] text-white shadow-xs'
-                  : 'text-stone-400 hover:text-stone-200',
+                  ? 'bg-[#34312d] text-white shadow-xs ring-1 ring-white/10'
+                  : 'text-stone-400 hover:bg-white/[0.04] hover:text-stone-200',
               ].join(' ')}
             >
-              <span>🧠 Engine</span>
+              <EngineTabIcon className="h-5 w-5" />
+              <span>Engine</span>
               {engineEnabled && (
-                <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+                <span className="absolute top-1.5 right-2 h-2 w-2 rounded-full bg-emerald-400 ring-2 ring-[#1e1c1a]" />
               )}
             </button>
           </div>
@@ -2218,7 +2323,10 @@ export function App() {
               )}
 
               {/* Spacious 2-column Move List */}
-              <div className="min-h-52 flex-1 overflow-y-auto px-3 py-2.5">
+              <div
+                ref={moveListContainerRef}
+                className="min-h-52 flex-1 overflow-y-auto px-3 py-2.5"
+              >
                 {moveRows.length === 0 ? (
                   <div className="flex h-full flex-col items-center justify-center gap-3 py-10 text-center">
                     <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-white/[0.04] text-2xl">
@@ -2970,9 +3078,9 @@ export function App() {
                   : 'Về đầu ván (↑ hoặc Home)'
               }
               aria-label="Về đầu ván"
-              className="rounded-lg bg-[#2d2b27] py-2 text-sm font-bold text-stone-200 transition hover:bg-[#3d3a36] disabled:opacity-35"
+              className="flex items-center justify-center rounded-xl bg-[#2d2b27] py-2.5 text-stone-100 transition hover:bg-[#3d3a36] disabled:opacity-35"
             >
-              ⏮
+              <FirstMoveIcon className="h-5 w-5" />
             </button>
             <button
               type="button"
@@ -2980,9 +3088,9 @@ export function App() {
               disabled={!variation && viewIndex === 0}
               title="Nước trước (←)"
               aria-label="Nước trước"
-              className="rounded-lg bg-[#2d2b27] py-2 text-sm font-bold text-stone-200 transition hover:bg-[#3d3a36] disabled:opacity-35"
+              className="flex items-center justify-center rounded-xl bg-[#2d2b27] py-2.5 text-stone-100 transition hover:bg-[#3d3a36] disabled:opacity-35"
             >
-              ◀
+              <PrevMoveIcon className="h-5 w-5" />
             </button>
             <button
               type="button"
@@ -2994,9 +3102,9 @@ export function App() {
               }
               title="Nước sau (→)"
               aria-label="Nước sau"
-              className="rounded-lg bg-[#2d2b27] py-2 text-sm font-bold text-stone-200 transition hover:bg-[#3d3a36] disabled:opacity-35"
+              className="flex items-center justify-center rounded-xl bg-[#2d2b27] py-2.5 text-stone-100 transition hover:bg-[#3d3a36] disabled:opacity-35"
             >
-              ▶
+              <NextMoveIcon className="h-5 w-5" />
             </button>
             <button
               type="button"
@@ -3008,9 +3116,9 @@ export function App() {
               }
               title="Về nước cuối (↓ hoặc End)"
               aria-label="Về nước cuối"
-              className="rounded-lg bg-[#2d2b27] py-2 text-sm font-bold text-stone-200 transition hover:bg-[#3d3a36] disabled:opacity-35"
+              className="flex items-center justify-center rounded-xl bg-[#2d2b27] py-2.5 text-stone-100 transition hover:bg-[#3d3a36] disabled:opacity-35"
             >
-              ⏭
+              <LastMoveIcon className="h-5 w-5" />
             </button>
           </div>
 
@@ -3022,24 +3130,27 @@ export function App() {
                 onClick={() =>
                   setOrientation((prev) => (prev === 'w' ? 'b' : 'w'))
                 }
-                className="rounded-lg bg-[#32302c] px-3 py-2.5 text-xs font-semibold text-stone-100 transition hover:bg-[#403d38]"
+                className="flex items-center justify-center gap-1.5 rounded-xl bg-[#32302c] px-3 py-2.5 text-xs font-semibold text-stone-100 transition hover:bg-[#403d38]"
               >
-                ⇅ Xoay bàn
+                <FlipIcon className="h-4 w-4 shrink-0" />
+                <span>Xoay bàn</span>
               </button>
               <button
                 type="button"
                 onClick={handleUndo}
                 disabled={!variation && viewIndex === 0}
-                className="rounded-lg bg-[#32302c] px-3 py-2.5 text-xs font-semibold text-stone-100 transition hover:bg-[#403d38] disabled:opacity-35"
+                className="flex items-center justify-center gap-1.5 rounded-xl bg-[#32302c] px-3 py-2.5 text-xs font-semibold text-stone-100 transition hover:bg-[#403d38] disabled:opacity-35"
               >
-                ↶ Hoàn tác
+                <UndoIcon className="h-4 w-4 shrink-0" />
+                <span>Hoàn tác</span>
               </button>
               <button
                 type="button"
                 onClick={handleReset}
-                className="rounded-lg bg-[#81b64c] px-3 py-2.5 text-xs font-bold text-[#161512] shadow-xs transition hover:bg-[#95c75d]"
+                className="flex items-center justify-center gap-1.5 rounded-xl bg-[#81b64c] px-3 py-2.5 text-xs font-bold text-[#161512] shadow-xs transition hover:bg-[#95c75d]"
               >
-                ↻ Ván mới
+                <ResetIcon className="h-4 w-4 shrink-0" />
+                <span>Ván mới</span>
               </button>
             </div>
 
@@ -3048,17 +3159,23 @@ export function App() {
                 type="button"
                 onClick={() => handleCopy('fen')}
                 title={fen}
-                className="rounded-lg bg-[#1a1917] py-1.5 text-xs font-medium text-stone-400 ring-1 ring-white/[0.06] transition hover:bg-[#2c2a26] hover:text-stone-200"
+                className="flex items-center justify-center gap-1.5 rounded-xl bg-[#1a1917] py-2 text-xs font-medium text-stone-300 ring-1 ring-white/[0.06] transition hover:bg-[#2c2a26] hover:text-white"
               >
-                {copiedType === 'fen' ? '✓ Đã sao chép FEN' : '📋 Sao chép FEN'}
+                <CopyIcon className="h-4 w-4 shrink-0 text-stone-400" />
+                <span>
+                  {copiedType === 'fen' ? 'Đã sao chép FEN ✓' : 'Sao chép FEN'}
+                </span>
               </button>
               <button
                 type="button"
                 onClick={() => handleCopy('pgn')}
                 disabled={moves.length === 0}
-                className="rounded-lg bg-[#1a1917] py-1.5 text-xs font-medium text-stone-400 ring-1 ring-white/[0.06] transition hover:bg-[#2c2a26] hover:text-stone-200 disabled:opacity-35"
+                className="flex items-center justify-center gap-1.5 rounded-xl bg-[#1a1917] py-2 text-xs font-medium text-stone-300 ring-1 ring-white/[0.06] transition hover:bg-[#2c2a26] hover:text-white disabled:opacity-35"
               >
-                {copiedType === 'pgn' ? '✓ Đã sao chép PGN' : '📋 Sao chép PGN'}
+                <CopyIcon className="h-4 w-4 shrink-0 text-stone-400" />
+                <span>
+                  {copiedType === 'pgn' ? 'Đã sao chép PGN ✓' : 'Sao chép PGN'}
+                </span>
               </button>
             </div>
           </div>

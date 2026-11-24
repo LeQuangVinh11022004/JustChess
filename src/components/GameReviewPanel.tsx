@@ -2,9 +2,11 @@ import {
   CLASSIFICATION_META,
   CLASSIFICATION_ORDER,
   estimateMatchRatings,
+  PHASE_GRADE_META,
   REVIEW_ENGINES,
   TIME_CONTROL_META,
   type GameOutcome,
+  type GamePhase,
   type GameReviewResult,
   type ReviewEngineId,
   type ReviewMoveInfo,
@@ -122,7 +124,7 @@ export function GameReviewPanel({
       <div className="rounded-xl bg-[#1f1d1a] p-3.5 ring-1 ring-white/[0.08]">
         <div className="flex items-start gap-3">
           <div
-            className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full text-lg shadow-sm ring-2"
+            className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full text-xl shadow-sm ring-2"
             style={{
               backgroundColor: currentMeta ? currentMeta.bg : '#302e2b',
               borderColor: currentMeta ? currentMeta.color : '#81b64c',
@@ -130,7 +132,7 @@ export function GameReviewPanel({
           >
             {currentMeta ? (
               <span
-                className="text-sm font-black"
+                className="text-base font-black"
                 style={{ color: currentMeta.color }}
               >
                 {currentMeta.symbol}
@@ -158,6 +160,27 @@ export function GameReviewPanel({
                   >
                     {currentMeta.label}
                   </span>
+                  {currentMove.runningElo && (
+                    <span
+                      title="Elo hiệu suất tích lũy sau nước đi này"
+                      className="ml-auto flex items-center gap-1 rounded bg-[#2a2824] px-1.5 py-0.5 font-mono text-[10px] font-bold text-stone-300 ring-1 ring-white/5"
+                    >
+                      <span>~{currentMove.runningElo}</span>
+                      {currentMove.ratingDelta !== undefined &&
+                        currentMove.ratingDelta !== 0 && (
+                          <span
+                            className={
+                              currentMove.ratingDelta > 0
+                                ? 'text-[#a3d160]'
+                                : 'text-red-400'
+                            }
+                          >
+                            ({currentMove.ratingDelta > 0 ? '+' : ''}
+                            {currentMove.ratingDelta})
+                          </span>
+                        )}
+                    </span>
+                  )}
                 </div>
                 <p className="mt-1.5 text-xs leading-relaxed text-stone-200">
                   {currentMove.commentary}
@@ -425,6 +448,146 @@ export function GameReviewPanel({
           )}
         </div>
 
+        {/* Overall & Game Phase Breakdown (Khai cuộc / Trung cuộc / Tàn cuộc) */}
+        <div className="mb-3 rounded-lg bg-[#181715] p-2.5 ring-1 ring-white/[0.05]">
+          <div className="mb-1.5 flex items-center justify-between text-[10px] font-semibold tracking-wider text-stone-400 uppercase">
+            <span>Đánh giá Overall &amp; Giai đoạn</span>
+            <span className="font-normal normal-case text-stone-500">
+              Nhấp để nhảy tới
+            </span>
+          </div>
+
+          <p className="mb-2 rounded-md bg-[#22201d] px-2.5 py-1.5 text-[11px] leading-relaxed text-stone-300">
+            {review.overallSummary}
+          </p>
+
+          <div className="flex flex-col gap-1 text-xs">
+            {/* Overall row */}
+            <div className="grid grid-cols-[1fr_auto_1fr] items-center rounded-lg bg-white/[0.04] px-2.5 py-1.5">
+              <div className="flex items-center gap-2">
+                <span
+                  className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[11px] font-black text-white shadow-xs"
+                  style={{
+                    backgroundColor:
+                      PHASE_GRADE_META[review.white.overallGrade].color,
+                  }}
+                >
+                  {PHASE_GRADE_META[review.white.overallGrade].symbol}
+                </span>
+                <span className="text-xs font-bold text-stone-100">
+                  {PHASE_GRADE_META[review.white.overallGrade].label}
+                </span>
+              </div>
+
+              <span className="px-2 text-[11px] font-bold tracking-wide text-stone-400 uppercase">
+                Overall
+              </span>
+
+              <div className="flex items-center justify-end gap-2">
+                <span className="text-xs font-bold text-stone-100">
+                  {PHASE_GRADE_META[review.black.overallGrade].label}
+                </span>
+                <span
+                  className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[11px] font-black text-white shadow-xs"
+                  style={{
+                    backgroundColor:
+                      PHASE_GRADE_META[review.black.overallGrade].color,
+                  }}
+                >
+                  {PHASE_GRADE_META[review.black.overallGrade].symbol}
+                </span>
+              </div>
+            </div>
+
+            {/* 3 Phases: Khai cuộc, Trung cuộc, Tàn cuộc */}
+            {(
+              [
+                {
+                  id: 'opening' as GamePhase,
+                  label: 'Khai cuộc',
+                  startPly: review.phaseRanges.openingStartPly,
+                },
+                {
+                  id: 'middlegame' as GamePhase,
+                  label: 'Trung cuộc',
+                  startPly: review.phaseRanges.middlegameStartPly,
+                },
+                {
+                  id: 'endgame' as GamePhase,
+                  label: 'Tàn cuộc',
+                  startPly: review.phaseRanges.endgameStartPly,
+                },
+              ] as const
+            ).map((phase) => {
+              const wPhase = review.white.phases[phase.id]
+              const bPhase = review.black.phases[phase.id]
+              const hasPhase = phase.startPly !== null
+
+              return (
+                <button
+                  key={phase.id}
+                  type="button"
+                  disabled={!hasPhase}
+                  onClick={() => {
+                    if (phase.startPly !== null) onSelectPly(phase.startPly)
+                  }}
+                  className="grid grid-cols-[1fr_auto_1fr] items-center rounded-lg px-2.5 py-1.5 text-left transition hover:bg-white/[0.06] disabled:opacity-45 disabled:hover:bg-transparent"
+                >
+                  <div className="flex items-center gap-2">
+                    {wPhase.grade && wPhase.accuracy !== null ? (
+                      <>
+                        <span
+                          className="flex h-5.5 w-5.5 shrink-0 items-center justify-center rounded-full text-[10px] font-black text-white shadow-xs"
+                          style={{
+                            backgroundColor:
+                              PHASE_GRADE_META[wPhase.grade].color,
+                          }}
+                        >
+                          {PHASE_GRADE_META[wPhase.grade].symbol}
+                        </span>
+                        <span className="font-mono text-xs font-bold text-stone-200">
+                          {Math.round(wPhase.accuracy)}%
+                        </span>
+                      </>
+                    ) : (
+                      <span className="font-mono text-xs text-stone-600">
+                        —
+                      </span>
+                    )}
+                  </div>
+
+                  <span className="px-2 text-xs font-semibold text-stone-300">
+                    {phase.label}
+                  </span>
+
+                  <div className="flex items-center justify-end gap-2">
+                    {bPhase.grade && bPhase.accuracy !== null ? (
+                      <>
+                        <span className="font-mono text-xs font-bold text-stone-200">
+                          {Math.round(bPhase.accuracy)}%
+                        </span>
+                        <span
+                          className="flex h-5.5 w-5.5 shrink-0 items-center justify-center rounded-full text-[10px] font-black text-white shadow-xs"
+                          style={{
+                            backgroundColor:
+                              PHASE_GRADE_META[bPhase.grade].color,
+                          }}
+                        >
+                          {PHASE_GRADE_META[bPhase.grade].symbol}
+                        </span>
+                      </>
+                    ) : (
+                      <span className="font-mono text-xs text-stone-600">
+                        —
+                      </span>
+                    )}
+                  </div>
+                </button>
+              )
+            })}
+          </div>
+        </div>
+
         {/* Full 9-tier Classification Breakdown Table */}
         <div className="flex flex-col gap-1 text-xs">
           {CLASSIFICATION_ORDER.map((tier) => {
@@ -442,18 +605,18 @@ export function GameReviewPanel({
             return (
               <div
                 key={tier}
-                className="grid grid-cols-[40px_1fr_40px] items-center rounded-md px-2 py-1 odd:bg-white/[0.025]"
+                className="grid grid-cols-[44px_1fr_44px] items-center rounded-lg px-2 py-1.5 odd:bg-white/[0.025]"
               >
                 <span
-                  className="text-center font-mono text-xs font-bold"
+                  className="text-center font-mono text-sm font-bold"
                   style={{ color: wCount > 0 ? meta.color : '#57534e' }}
                 >
                   {wCount}
                 </span>
 
-                <div className="flex items-center justify-center gap-2 text-xs text-stone-300">
+                <div className="flex items-center justify-center gap-2 text-xs font-medium text-stone-200">
                   <span
-                    className="flex h-4.5 w-4.5 items-center justify-center rounded-full text-[9px] font-black"
+                    className="flex h-5.5 w-5.5 shrink-0 items-center justify-center rounded-full text-[10px] font-black shadow-xs"
                     style={{
                       backgroundColor: meta.color,
                       color: meta.badgeText,
@@ -465,7 +628,7 @@ export function GameReviewPanel({
                 </div>
 
                 <span
-                  className="text-center font-mono text-xs font-bold"
+                  className="text-center font-mono text-sm font-bold"
                   style={{ color: bCount > 0 ? meta.color : '#57534e' }}
                 >
                   {bCount}

@@ -670,7 +670,7 @@ export function ChessBoard({
                       backgroundColor: moveBadge.color,
                       color: moveBadge.textColor,
                     }}
-                    className="pointer-events-none absolute top-0.5 right-0.5 z-30 flex h-5 w-5 items-center justify-center rounded-full text-[10px] leading-none font-black shadow-[0_2px_6px_rgba(0,0,0,0.55)] ring-2 ring-[#161512] sm:h-6 sm:w-6 sm:text-[11px]"
+                    className="pointer-events-none absolute top-0.5 right-0.5 z-30 flex h-6 w-6 items-center justify-center rounded-full text-[11px] leading-none font-black shadow-[0_2px_8px_rgba(0,0,0,0.6)] ring-2 ring-[#161512] sm:h-7 sm:w-7 sm:text-xs"
                   >
                     {moveBadge.symbol}
                   </span>

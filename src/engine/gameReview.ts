@@ -166,8 +166,67 @@ export interface ReviewMoveInfo {
   /** Human-readable SAN line of engine's recommended continuation instead of this move */
   recommendedLine?: string
   winLoss: number
+  /** Running objective Game Rating (Chess.com scale) of the mover right after this move */
+  runningElo?: number
+  /** How much this specific move shifted the mover's running Game Rating (+/- Elo) */
+  ratingDelta?: number
+  phase: GamePhase
   classification: MoveClassification
   commentary: string
+}
+
+export type GamePhase = 'opening' | 'middlegame' | 'endgame'
+
+export type PhaseGrade = 'excellent' | 'good' | 'okay' | 'weak' | 'poor'
+
+export interface PhaseStats {
+  moveCount: number
+  accuracy: number | null
+  blunders: number
+  mistakes: number
+  grade: PhaseGrade | null
+}
+
+export interface PhaseRanges {
+  openingStartPly: number | null
+  middlegameStartPly: number | null
+  endgameStartPly: number | null
+}
+
+export const PHASE_GRADE_META: Record<
+  PhaseGrade,
+  { symbol: string; label: string; color: string; bg: string }
+> = {
+  excellent: {
+    symbol: '★',
+    label: 'Xuất sắc',
+    color: '#81b64c',
+    bg: 'rgba(129, 182, 76, 0.2)',
+  },
+  good: {
+    symbol: '✓',
+    label: 'Tốt',
+    color: '#96bc4b',
+    bg: 'rgba(150, 188, 75, 0.16)',
+  },
+  okay: {
+    symbol: '?!',
+    label: 'Ổn',
+    color: '#f0c15c',
+    bg: 'rgba(240, 193, 92, 0.2)',
+  },
+  weak: {
+    symbol: '?',
+    label: 'Yếu',
+    color: '#e6912c',
+    bg: 'rgba(230, 145, 44, 0.22)',
+  },
+  poor: {
+    symbol: '??',
+    label: 'Kém',
+    color: '#ca3431',
+    bg: 'rgba(202, 52, 49, 0.24)',
+  },
 }
 
 export interface SideReviewSummary {
@@ -178,6 +237,8 @@ export interface SideReviewSummary {
   evaluatedMoves: number
   estimatedRating: number
   ratings: EstimatedRatings
+  phases: Record<GamePhase, PhaseStats>
+  overallGrade: PhaseGrade
   brilliant: number
   great: number
   best: number
@@ -195,6 +256,8 @@ export interface GameReviewResult {
   /** White win probability at ply 0 (starting position) */
   startWinPercent: number
   moves: ReviewMoveInfo[]
+  phaseRanges: PhaseRanges
+  overallSummary: string
   white: SideReviewSummary
   black: SideReviewSummary
 }
@@ -397,6 +460,12 @@ export function classifyLiveMove(params: {
     params.color === 'w' ? whiteWinAfter : 100 - whiteWinAfter
   const winLoss = Math.max(0, moverWinBefore - moverWinAfter)
 
+  const cpBeforeWhite = evalToCappedCp(params.before.cp, params.before.mate)
+  const cpAfterWhite = evalToCappedCp(params.after.cp, params.after.mate)
+  const moverCpBefore = params.color === 'w' ? cpBeforeWhite : -cpBeforeWhite
+  const moverCpAfter = params.color === 'w' ? cpAfterWhite : -cpAfterWhite
+  const cpLoss = Math.max(0, Math.min(1000, moverCpBefore - moverCpAfter))
+
   const classification = classifyMove({
     ply: params.ply,
     isStandardStart: params.isStandardStart,
@@ -404,6 +473,7 @@ export function classifyLiveMove(params: {
     san: params.san,
     bestMoveBefore: params.before.bestMove,
     winLoss,
+    cpLoss,
     moverWinBefore,
     moverWinAfter,
     onlyMoveGap: 0,
@@ -478,6 +548,7 @@ function classifyMove(params: {
   san: string
   bestMoveBefore: string | null
   winLoss: number
+  cpLoss: number
   moverWinBefore: number
   moverWinAfter: number
   /** Win% gap between best move (MultiPV 1) and 2nd best move (MultiPV 2) */
@@ -494,6 +565,7 @@ function classifyMove(params: {
     uci,
     bestMoveBefore,
     winLoss,
+    cpLoss,
     moverWinBefore,
     moverWinAfter,
     onlyMoveGap,
@@ -527,23 +599,20 @@ function classifyMove(params: {
     return 'blunder'
   }
 
-  // Opening book heuristic: standard opening plies with balanced eval and low loss
+  // Opening book heuristic: standard opening plies with tight accuracy & balanced eval
   if (
     isStandardStart &&
     ply <= 10 &&
-    winLoss <= 1.8 &&
-    moverWinAfter >= 44 &&
-    moverWinAfter <= 57
+    winLoss <= 1.2 &&
+    cpLoss <= 25 &&
+    moverWinAfter >= 45 &&
+    moverWinAfter <= 56
   ) {
     return 'book'
   }
 
   // Brilliant (!!): strict Chess.com criteria:
-  // 1. True material sacrifice (SEE <= -2, NOT an equal trade)
-  // 2. Top / near-top move (winLoss <= 1.2%)
-  // 3. Not already trivially crushing (< 88%), unless it unlocks a new forced mate
-  // 4. Keeps at least equal/winning position (>= 48%)
-  // 5. Meaningful tactical difficulty (onlyMoveGap >= 4% or forces mate)
+  // True SEE sacrifice (<= -2), top move, non-trivial position, unlocks mate or sharp gap
   const unlocksNewMate =
     mateAfterForMover !== null &&
     mateAfterForMover > 0 &&
@@ -551,20 +620,19 @@ function classifyMove(params: {
 
   if (
     isSacrifice &&
-    (isTopChoice || winLoss <= 1.2) &&
+    (isTopChoice || (winLoss <= 0.8 && cpLoss <= 15)) &&
     ply >= 6 &&
     moverWinAfter >= 48 &&
     (moverWinBefore < 88 || unlocksNewMate) &&
-    (onlyMoveGap >= 4 || unlocksNewMate)
+    (onlyMoveGap >= 5 || unlocksNewMate)
   ) {
     return 'brilliant'
   }
 
-  // Great (!): genuine "only move" (large MultiPV1 vs MultiPV2 gap >= 14% win chance)
-  // OR cleanly punishing an opponent's blunder with the exact top move
+  // Great (!): genuine "only move" (MultiPV1 vs MultiPV2 gap >= 14% win chance)
   if (
     isTopChoice &&
-    winLoss <= 1.0 &&
+    winLoss <= 0.8 &&
     ply >= 6 &&
     moverWinBefore < 92 &&
     (onlyMoveGap >= 14 || (wasBlunderBefore && onlyMoveGap >= 9))
@@ -572,11 +640,12 @@ function classifyMove(params: {
     return 'great'
   }
 
-  if (isTopChoice || winLoss <= 1.2) return 'best'
-  if (winLoss <= 3.5) return 'excellent'
-  if (winLoss <= 6.5) return 'good'
-  if (winLoss <= 12.0) return 'inaccuracy'
-  if (winLoss <= 22.0) return 'mistake'
+  // Strict Tournament Coach thresholds combining win% loss AND centipawn loss
+  if (isTopChoice || (winLoss <= 0.6 && cpLoss <= 12)) return 'best'
+  if (winLoss <= 2.0 && cpLoss <= 35) return 'excellent'
+  if (winLoss <= 4.2 && cpLoss <= 65) return 'good'
+  if (winLoss <= 8.5 && cpLoss <= 130) return 'inaccuracy'
+  if (winLoss <= 15.0 && cpLoss <= 240) return 'mistake'
   return 'blunder'
 }
 
@@ -908,6 +977,7 @@ function computeRawChessComPerf(params: {
   accuracy: number
   acpl?: number
   totalMoves?: number
+  inaccuracy?: number
   blunder: number
   mistake: number
   brilliant: number
@@ -919,6 +989,7 @@ function computeRawChessComPerf(params: {
     accuracy,
     acpl = Math.max(8, Math.round((100 - accuracy) * 2.4)),
     totalMoves = 25,
+    inaccuracy = 0,
     blunder,
     mistake,
     brilliant,
@@ -927,24 +998,26 @@ function computeRawChessComPerf(params: {
     sideResult = 'unknown',
   } = params
 
-  // 1. Accuracy -> Elo curve (Rapid reference):
-  //    35% -> ~420 | 50% -> ~680 | 65% -> ~1060 | 75% -> ~1400 | 82% -> ~1720 | 88% -> ~2040 | 94% -> ~2400 | 98% -> ~2680
+  // 1. Accuracy -> Elo curve (strict coaching calibration)
   const accClamped = Math.max(20, Math.min(99.5, accuracy))
-  const eloFromAcc = 300 + Math.pow((accClamped - 20) / 80, 1.58) * 2460
+  const eloFromAcc = 280 + Math.pow((accClamped - 20) / 80, 1.65) * 2480
 
-  // 2. ACPL -> Elo curve (empirical Lichess/FIDE mapping):
-  //    ACPL 8 -> ~2650 | 15 -> ~2400 | 26 -> ~2080 | 40 -> ~1760 | 58 -> ~1440 | 85 -> ~1100 | 135 -> ~720
+  // 2. ACPL -> Elo curve (stricter decay on centipawn loss)
   const acplClamped = Math.max(4, Math.min(260, acpl))
-  const eloFromAcpl = 2850 * Math.exp(-0.0115 * acplClamped) + 140
+  const eloFromAcpl = 2860 * Math.exp(-0.0128 * acplClamped) + 120
 
-  // 3. Error rate adjustment (normalized per move so short/long games are fair)
+  // 3. Stricter error rate penalty (Blunders, Mistakes, AND Inaccuracies all impact Game Rating!)
   const safeMoves = Math.max(6, totalMoves)
   const blunderRate = blunder / safeMoves
   const mistakeRate = mistake / safeMoves
-  const errorPenalty = Math.min(280, blunderRate * 900 + mistakeRate * 320)
+  const inaccRate = inaccuracy / safeMoves
+  const errorPenalty = Math.min(
+    420,
+    blunderRate * 1250 + mistakeRate * 480 + inaccRate * 180,
+  )
 
-  // 4. Genuine tactical brilliance bonus
-  const tacticalBonus = Math.min(110, brilliant * 55 + great * 25)
+  // 4. Genuine tactical brilliance & precision bonus
+  const tacticalBonus = Math.min(130, brilliant * 65 + great * 30)
 
   // 5. Time-control calibration
   const tcShiftMap: Record<TimeControlCategory, number> = {
@@ -954,7 +1027,7 @@ function computeRawChessComPerf(params: {
     classical: -90,
   }
 
-  // 6. Small objective result adjustment (winning cleanly > losing at equal accuracy)
+  // 6. Small objective result adjustment
   const resultNudge =
     sideResult === 'win' ? 75 : sideResult === 'loss' ? -75 : 0
 
@@ -976,6 +1049,7 @@ export function estimateCrossPlatformRatings(params: {
   accuracy: number
   acpl?: number
   totalMoves?: number
+  inaccuracy?: number
   blunder: number
   mistake: number
   brilliant: number
@@ -1042,6 +1116,7 @@ export function estimateMatchRatings(params: {
     accuracy: white.accuracy,
     acpl: white.acpl,
     totalMoves: whiteTotalMoves,
+    inaccuracy: white.inaccuracy,
     blunder: white.blunder,
     mistake: white.mistake,
     brilliant: white.brilliant,
@@ -1054,6 +1129,7 @@ export function estimateMatchRatings(params: {
     accuracy: black.accuracy,
     acpl: black.acpl,
     totalMoves: blackTotalMoves,
+    inaccuracy: black.inaccuracy,
     blunder: black.blunder,
     mistake: black.mistake,
     brilliant: black.brilliant,
@@ -1142,18 +1218,185 @@ function computeLichessAccuracy(
   return Math.round(Math.max(0, Math.min(100, combined)) * 10) / 10
 }
 
+/**
+ * Classifies a position's game phase (Opening / Middlegame / Endgame) monotonically
+ * using remaining non-pawn material, queen presence, and move number.
+ */
+function detectPositionPhase(
+  fen: string,
+  moveNumber: number,
+  prevPhase: GamePhase,
+): GamePhase {
+  const boardPart = fen.split(' ')[0] ?? ''
+  let nonPawnMaterial = 0
+  let whiteQueens = 0
+  let blackQueens = 0
+  let minorMajorCount = 0
+
+  for (const ch of boardPart) {
+    const lower = ch.toLowerCase()
+    if (lower === 'q') {
+      nonPawnMaterial += 9
+      minorMajorCount += 1
+      if (ch === 'Q') whiteQueens += 1
+      else blackQueens += 1
+    } else if (lower === 'r') {
+      nonPawnMaterial += 5
+      minorMajorCount += 1
+    } else if (lower === 'b' || lower === 'n') {
+      nonPawnMaterial += 3
+      minorMajorCount += 1
+    }
+  }
+
+  // Endgame: low remaining non-pawn material or queens traded with few pieces left
+  const isEndgame =
+    nonPawnMaterial <= 22 ||
+    minorMajorCount <= 6 ||
+    (whiteQueens === 0 && blackQueens === 0 && nonPawnMaterial <= 26)
+
+  if (prevPhase === 'endgame' || isEndgame) {
+    return 'endgame'
+  }
+
+  // Middlegame: after move 10, or once queens are traded, or significant exchanges (>= 12 pts off)
+  const isMiddlegame =
+    moveNumber > 10 ||
+    whiteQueens === 0 ||
+    blackQueens === 0 ||
+    nonPawnMaterial <= 50
+
+  if (prevPhase === 'middlegame' || isMiddlegame) {
+    return 'middlegame'
+  }
+
+  return 'opening'
+}
+
+function gradeFromAccuracy(
+  accuracy: number,
+  blunders: number,
+  moveCount: number,
+): PhaseGrade {
+  const blunderRatio = blunders / Math.max(1, moveCount)
+  if (accuracy >= 88 && blunders === 0) return 'excellent'
+  if (accuracy >= 76 && blunderRatio <= 0.08) return 'good'
+  if (accuracy >= 62 && blunderRatio <= 0.16) return 'okay'
+  if (accuracy >= 48) return 'weak'
+  return 'poor'
+}
+
+function computePhaseStats(
+  sideMoves: ReviewMoveInfo[],
+  phase: GamePhase,
+): PhaseStats {
+  const phaseMoves = sideMoves.filter((m) => m.phase === phase)
+  if (phaseMoves.length === 0) {
+    return {
+      moveCount: 0,
+      accuracy: null,
+      blunders: 0,
+      mistakes: 0,
+      grade: null,
+    }
+  }
+
+  let accSum = 0
+  let blunders = 0
+  let mistakes = 0
+
+  for (const m of phaseMoves) {
+    const acc = Math.max(
+      0,
+      Math.min(
+        100,
+        103.1668 * Math.exp(-0.04354 * Math.max(0, m.winLoss)) - 3.1669,
+      ),
+    )
+    accSum += acc
+    if (m.classification === 'blunder') blunders += 1
+    else if (m.classification === 'mistake') mistakes += 1
+  }
+
+  const accuracy = Math.round((accSum / phaseMoves.length) * 10) / 10
+  return {
+    moveCount: phaseMoves.length,
+    accuracy,
+    blunders,
+    mistakes,
+    grade: gradeFromAccuracy(accuracy, blunders, phaseMoves.length),
+  }
+}
+
+function buildOverallSummary(
+  white: SideReviewSummary,
+  black: SideReviewSummary,
+): string {
+  const phaseNames: Record<GamePhase, string> = {
+    opening: 'Khai cuộc',
+    middlegame: 'Trung cuộc',
+    endgame: 'Tàn cuộc',
+  }
+
+  let biggestPhase: GamePhase = 'middlegame'
+  let biggestGap = -1
+  let winnerInPhase: 'Trắng' | 'Đen' = 'Trắng'
+
+  for (const ph of ['opening', 'middlegame', 'endgame'] as GamePhase[]) {
+    const wAcc = white.phases[ph].accuracy
+    const bAcc = black.phases[ph].accuracy
+    if (wAcc !== null && bAcc !== null) {
+      const gap = Math.abs(wAcc - bAcc)
+      if (gap > biggestGap) {
+        biggestGap = gap
+        biggestPhase = ph
+        winnerInPhase = wAcc >= bAcc ? 'Trắng' : 'Đen'
+      }
+    }
+  }
+
+  if (biggestGap >= 10) {
+    const wAcc = Math.round(white.phases[biggestPhase].accuracy ?? 0)
+    const bAcc = Math.round(black.phases[biggestPhase].accuracy ?? 0)
+    return `Điểm nhấn quyết định nằm ở ${phaseNames[biggestPhase]} khi bên ${winnerInPhase} chơi vượt trội (${wAcc}% vs ${bAcc}%).`
+  }
+
+  if (white.accuracy >= 85 && black.accuracy >= 85) {
+    return 'Ván đấu chất lượng cao, cả hai bên đều duy trì độ chính xác ổn định qua các giai đoạn.'
+  }
+
+  if (white.blunder + black.blunder >= 4) {
+    return `Thế cờ diễn biến căng thẳng với nhiều sai lầm chiến thuật (${white.blunder + black.blunder} Blunder) xoay chuyển cục diện.`
+  }
+
+  return `Hai bên bám đuổi khá sát (${white.accuracy}% vs ${black.accuracy}%), phân định bằng sự chính xác ở những nước then chốt.`
+}
+
 function computeSideSummary(
   allMoves: ReviewMoveInfo[],
   startWinPercent: number,
   color: 'w' | 'b',
 ): SideReviewSummary {
   const sideMoves = allMoves.filter((m) => m.color === color)
+  const emptyPhase: PhaseStats = {
+    moveCount: 0,
+    accuracy: null,
+    blunders: 0,
+    mistakes: 0,
+    grade: null,
+  }
   const summary: SideReviewSummary = {
     accuracy: 100,
     acpl: 0,
     evaluatedMoves: 0,
     estimatedRating: 1500,
     ratings: { fide: 1500, chesscom: 1500, lichess: 1750 },
+    phases: {
+      opening: { ...emptyPhase },
+      middlegame: { ...emptyPhase },
+      endgame: { ...emptyPhase },
+    },
+    overallGrade: 'good',
     brilliant: 0,
     great: 0,
     best: 0,
@@ -1180,10 +1423,21 @@ function computeSideSummary(
   summary.accuracy = accuracy
   summary.acpl = acpl
   summary.evaluatedMoves = evaluatedMoves
+  summary.phases = {
+    opening: computePhaseStats(sideMoves, 'opening'),
+    middlegame: computePhaseStats(sideMoves, 'middlegame'),
+    endgame: computePhaseStats(sideMoves, 'endgame'),
+  }
+  summary.overallGrade = gradeFromAccuracy(
+    accuracy,
+    summary.blunder,
+    sideMoves.length,
+  )
   summary.ratings = estimateCrossPlatformRatings({
     accuracy,
     acpl,
     totalMoves: sideMoves.length,
+    inaccuracy: summary.inaccuracy,
     blunder: summary.blunder,
     mistake: summary.mistake,
     brilliant: summary.brilliant,
@@ -1465,12 +1719,42 @@ export async function runFullGameReview(
     san: string
     color: 'w' | 'b'
     moveNumber: number
+    phase: GamePhase
     isSacrifice: boolean
   }> = []
+
+  let currentPhase: GamePhase = isStandardStart
+    ? 'opening'
+    : detectPositionPhase(chess.fen(), startMoveNum, 'opening')
+
+  const phaseRanges: PhaseRanges = {
+    openingStartPly: null,
+    middlegameStartPly: null,
+    endgameStartPly: null,
+  }
 
   for (let idx = 0; idx < moves.length; idx++) {
     const m = moves[idx]
     const color = chess.turn()
+    const moveNumber = startsBlack
+      ? startMoveNum + Math.floor((idx + 1) / 2)
+      : startMoveNum + Math.floor(idx / 2)
+
+    currentPhase = detectPositionPhase(chess.fen(), moveNumber, currentPhase)
+    const plyNum = idx + 1
+    if (currentPhase === 'opening' && phaseRanges.openingStartPly === null) {
+      phaseRanges.openingStartPly = plyNum
+    } else if (
+      currentPhase === 'middlegame' &&
+      phaseRanges.middlegameStartPly === null
+    ) {
+      phaseRanges.middlegameStartPly = plyNum
+    } else if (
+      currentPhase === 'endgame' &&
+      phaseRanges.endgameStartPly === null
+    ) {
+      phaseRanges.endgameStartPly = plyNum
+    }
 
     const executed = chess.move({
       from: m.from,
@@ -1488,10 +1772,6 @@ export async function runFullGameReview(
         : 0
     const isSacrifice = exchangeNet <= -2
 
-    const moveNumber = startsBlack
-      ? startMoveNum + Math.floor((idx + 1) / 2)
-      : startMoveNum + Math.floor(idx / 2)
-
     moveMeta.push({
       uci: `${m.from}${m.to}${m.promotion ?? ''}`,
       from: m.from,
@@ -1499,6 +1779,7 @@ export async function runFullGameReview(
       san: m.san,
       color,
       moveNumber,
+      phase: currentPhase,
       isSacrifice,
     })
 
@@ -1654,6 +1935,7 @@ export async function runFullGameReview(
         san: meta.san,
         bestMoveBefore: before.bestMove,
         winLoss,
+        cpLoss,
         moverWinBefore,
         moverWinAfter,
         onlyMoveGap,
@@ -1708,18 +1990,43 @@ export async function runFullGameReview(
         refutationLine: refutationLine || undefined,
         recommendedLine: recommendedLine || undefined,
         winLoss,
+        phase: meta.phase,
         classification,
         commentary,
       })
     }
+
+    // Compute running objective Game Rating & per-move Elo delta for every ply
+    // so players immediately see how each good/bad move shifted their performance rating!
+    let prevWhiteElo: number | null = null
+    let prevBlackElo: number | null = null
+    for (let i = 0; i < reviewedMoves.length; i++) {
+      const m = reviewedMoves[i]
+      const prefix = reviewedMoves.slice(0, i + 1)
+      const sideSummary = computeSideSummary(prefix, startWinPercent, m.color)
+      const runningElo = sideSummary.ratings.chesscom
+
+      const prevElo = m.color === 'w' ? prevWhiteElo : prevBlackElo
+      const ratingDelta = prevElo !== null ? runningElo - prevElo : 0
+      m.runningElo = runningElo
+      m.ratingDelta = ratingDelta
+
+      if (m.color === 'w') prevWhiteElo = runningElo
+      else prevBlackElo = runningElo
+    }
+
+    const whiteSummary = computeSideSummary(reviewedMoves, startWinPercent, 'w')
+    const blackSummary = computeSideSummary(reviewedMoves, startWinPercent, 'b')
 
     return {
       engineId,
       engineLabel: engineMeta.label,
       startWinPercent,
       moves: reviewedMoves,
-      white: computeSideSummary(reviewedMoves, startWinPercent, 'w'),
-      black: computeSideSummary(reviewedMoves, startWinPercent, 'b'),
+      phaseRanges,
+      overallSummary: buildOverallSummary(whiteSummary, blackSummary),
+      white: whiteSummary,
+      black: blackSummary,
     }
   } finally {
     if (!isMaia) {
