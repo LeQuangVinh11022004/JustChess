@@ -1,16 +1,27 @@
 import {
   CLASSIFICATION_META,
   CLASSIFICATION_ORDER,
+  estimateCrossPlatformRatings,
   REVIEW_ENGINES,
+  TIME_CONTROL_META,
   type GameReviewResult,
   type ReviewEngineId,
   type ReviewMoveInfo,
+  type TimeControlCategory,
 } from '../engine/gameReview'
 import { WinRateGraph } from './WinRateGraph'
+
+const TIME_CONTROLS: TimeControlCategory[] = [
+  'bullet',
+  'blitz',
+  'rapid',
+  'classical',
+]
 
 interface GameReviewPanelProps {
   review: GameReviewResult
   selectedEngine: ReviewEngineId
+  timeControl: TimeControlCategory
   whiteName: string
   blackName: string
   currentPly: number
@@ -20,12 +31,14 @@ interface GameReviewPanelProps {
   onSelectPly: (ply: number) => void
   onPlayBestMove: (uci: string, atPly: number) => void
   onChangeReviewEngine: (engineId: ReviewEngineId) => void
+  onChangeTimeControl: (tc: TimeControlCategory) => void
   onReRunReview: (engineId?: ReviewEngineId) => void
 }
 
 export function GameReviewPanel({
   review,
   selectedEngine,
+  timeControl,
   whiteName,
   blackName,
   currentPly,
@@ -35,8 +48,26 @@ export function GameReviewPanel({
   onSelectPly,
   onPlayBestMove,
   onChangeReviewEngine,
+  onChangeTimeControl,
   onReRunReview,
 }: GameReviewPanelProps) {
+  const tcMeta = TIME_CONTROL_META[timeControl]
+  const whiteRatings = estimateCrossPlatformRatings({
+    accuracy: review.white.accuracy,
+    blunder: review.white.blunder,
+    mistake: review.white.mistake,
+    brilliant: review.white.brilliant,
+    great: review.white.great,
+    timeControl,
+  })
+  const blackRatings = estimateCrossPlatformRatings({
+    accuracy: review.black.accuracy,
+    blunder: review.black.blunder,
+    mistake: review.black.mistake,
+    brilliant: review.black.brilliant,
+    great: review.black.great,
+    timeControl,
+  })
   const currentMove: ReviewMoveInfo | null =
     currentPly > 0 ? review.moves[currentPly - 1] ?? null : null
 
@@ -277,48 +308,75 @@ export function GameReviewPanel({
           </div>
         </div>
 
-        {/* 3-System Estimated Elo Rating Comparison: FIDE / Chess.com / Lichess */}
+        {/* 3-System Estimated Elo Rating Comparison calibrated by Time Control */}
         <div className="mb-3 rounded-lg bg-[#181715] p-2.5 ring-1 ring-white/[0.05]">
-          <div className="mb-1.5 text-center text-[10px] font-semibold tracking-wider text-stone-400 uppercase">
-            Ước lượng Elo trận đấu (3 hệ thống)
+          <div className="mb-2 flex flex-col gap-1.5">
+            <div className="text-center text-[10px] font-semibold tracking-wider text-stone-400 uppercase">
+              Ước lượng Elo theo thể loại cờ
+            </div>
+            <div className="grid grid-cols-4 gap-1 rounded-md bg-[#22201d] p-0.5">
+              {TIME_CONTROLS.map((tc) => (
+                <button
+                  key={tc}
+                  type="button"
+                  onClick={() => onChangeTimeControl(tc)}
+                  title={TIME_CONTROL_META[tc].label}
+                  className={[
+                    'rounded py-1 text-[10px] font-semibold transition',
+                    timeControl === tc
+                      ? 'bg-[#36332e] text-white shadow-xs'
+                      : 'text-stone-400 hover:text-stone-200',
+                  ].join(' ')}
+                >
+                  {TIME_CONTROL_META[tc].shortLabel}
+                </button>
+              ))}
+            </div>
           </div>
+
           <div className="flex flex-col gap-1 text-xs">
             <div className="grid grid-cols-[1fr_auto_1fr] items-center rounded px-2 py-1 odd:bg-white/[0.025]">
               <span className="font-mono font-bold text-amber-300">
-                ~{review.white.ratings.fide}
+                ~{whiteRatings.fide}
               </span>
               <span className="rounded bg-amber-500/15 px-2 py-0.5 text-[10px] font-bold text-amber-300">
-                FIDE
+                {tcMeta.fideLabel}
               </span>
               <span className="text-right font-mono font-bold text-amber-300">
-                ~{review.black.ratings.fide}
+                ~{blackRatings.fide}
               </span>
             </div>
 
             <div className="grid grid-cols-[1fr_auto_1fr] items-center rounded px-2 py-1 odd:bg-white/[0.025]">
               <span className="font-mono font-bold text-[#a3d160]">
-                ~{review.white.ratings.chesscom}
+                ~{whiteRatings.chesscom}
               </span>
               <span className="rounded bg-[#81b64c]/15 px-2 py-0.5 text-[10px] font-bold text-[#a3d160]">
-                Chess.com
+                {tcMeta.chesscomLabel}
               </span>
               <span className="text-right font-mono font-bold text-[#a3d160]">
-                ~{review.black.ratings.chesscom}
+                ~{blackRatings.chesscom}
               </span>
             </div>
 
             <div className="grid grid-cols-[1fr_auto_1fr] items-center rounded px-2 py-1 odd:bg-white/[0.025]">
               <span className="font-mono font-bold text-sky-300">
-                ~{review.white.ratings.lichess}
+                ~{whiteRatings.lichess}
               </span>
               <span className="rounded bg-sky-500/15 px-2 py-0.5 text-[10px] font-bold text-sky-300">
-                Lichess
+                {tcMeta.lichessLabel}
               </span>
               <span className="text-right font-mono font-bold text-sky-300">
-                ~{review.black.ratings.lichess}
+                ~{blackRatings.lichess}
               </span>
             </div>
           </div>
+
+          {timeControl === 'bullet' && (
+            <p className="mt-1.5 text-center text-[10px] text-stone-500">
+              *FIDE không có hệ số Bullet riêng nên quy đổi sang FIDE Blitz.
+            </p>
+          )}
         </div>
 
         {/* Full 9-tier Classification Breakdown Table */}

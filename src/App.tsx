@@ -26,11 +26,13 @@ import type {
 import {
   CLASSIFICATION_META,
   classifyLiveMove,
+  detectTimeControl,
   REVIEW_ENGINES,
   runFullGameReview,
   type GameReviewResult,
   type ReviewEngineId,
   type ReviewMoveInfo,
+  type TimeControlCategory,
 } from './engine/gameReview'
 import {
   fetchLichessCloudEval,
@@ -65,6 +67,14 @@ interface StoredMove {
   to: Square
   san: string
   promotion?: PieceSymbol
+}
+
+interface VariationBranch {
+  /** Mainline ply where this variation branches off */
+  branchPly: number
+  moves: StoredMove[]
+  /** Current ply inside variation (1 .. moves.length) */
+  cursor: number
 }
 
 interface PlayerNames {
@@ -245,6 +255,7 @@ export function App() {
   const [startFen, setStartFen] = useState<string>(DEFAULT_POSITION)
   const [moves, setMoves] = useState<StoredMove[]>([])
   const [viewIndex, setViewIndex] = useState<number>(0)
+  const [variation, setVariation] = useState<VariationBranch | null>(null)
   const [players, setPlayers] = useState<PlayerNames>(DEFAULT_PLAYERS)
   const [gameMeta, setGameMeta] = useState<string | null>(null)
 
@@ -314,6 +325,7 @@ export function App() {
   const [sidebarTab, setSidebarTab] = useState<SidebarTab>('game')
   const [reviewEngine, setReviewEngine] =
     useState<ReviewEngineId>('stockfish-12')
+  const [timeControl, setTimeControl] = useState<TimeControlCategory>('rapid')
   const [showBestMoveHint, setShowBestMoveHint] = useState<boolean>(false)
   const [reviewResult, setReviewResult] = useState<GameReviewResult | null>(
     null,
@@ -327,10 +339,16 @@ export function App() {
 
   const activeMoveRef = useRef<HTMLButtonElement>(null)
 
-  const displayGame = useMemo(
-    () => buildGameAtPly(startFen, moves, viewIndex),
-    [startFen, moves, viewIndex],
-  )
+  const displayGame = useMemo(() => {
+    if (variation) {
+      const combined = [
+        ...moves.slice(0, variation.branchPly),
+        ...variation.moves.slice(0, variation.cursor),
+      ]
+      return buildGameAtPly(startFen, combined, combined.length)
+    }
+    return buildGameAtPly(startFen, moves, viewIndex)
+  }, [startFen, moves, viewIndex, variation])
   const fen = displayGame.fen()
   const isCheckmate = displayGame.isCheckmate()
   const isGameOver = displayGame.isGameOver()
@@ -341,8 +359,14 @@ export function App() {
   const checkedKingSquare = findCheckedKingSquare(displayGame)
   const material = getMaterialSummary(displayGame)
 
-  const lastMove: LastMove | null =
-    viewIndex > 0
+  const lastMove: LastMove | null = variation
+    ? variation.cursor > 0
+      ? {
+          from: variation.moves[variation.cursor - 1].from,
+          to: variation.moves[variation.cursor - 1].to,
+        }
+      : null
+    : viewIndex > 0
       ? {
           from: moves[viewIndex - 1].from,
           to: moves[viewIndex - 1].to,
@@ -361,7 +385,7 @@ export function App() {
   }, [reviewResult])
 
   const currentReviewMove =
-    viewIndex > 0 ? reviewMoveMap.get(viewIndex) ?? null : null
+    !variation && viewIndex > 0 ? reviewMoveMap.get(viewIndex) ?? null : null
 
   const liveMoveVerdict = (() => {
     if (currentReviewMove || !liveMoveCtx || liveMoveCtx.fenAfter !== fen) {
@@ -713,7 +737,7 @@ export function App() {
     activeMoveRef.current?.scrollIntoView({ block: 'nearest' })
   }, [viewIndex])
 
-  // Keyboard navigation for replay (ArrowLeft / ArrowRight / Home / End)
+  // Keyboard navigation for replay (ArrowLeft / ArrowRight / ArrowUp / ArrowDown / Home / End)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (importModalTab !== null) return
@@ -729,37 +753,69 @@ export function App() {
 
       if (e.key === 'ArrowLeft') {
         e.preventDefault()
-        setViewIndex((prev) => {
-          const next = Math.max(0, prev - 1)
-          if (next !== prev && soundEnabled) chessSounds.play('move')
-          return next
-        })
+        if (variation) {
+          if (variation.cursor <= 1) {
+            setViewIndex(variation.branchPly)
+            setVariation(null)
+          } else {
+            setVariation({ ...variation, cursor: variation.cursor - 1 })
+          }
+          if (soundEnabled) chessSounds.play('move')
+        } else {
+          setViewIndex((prev) => {
+            const next = Math.max(0, prev - 1)
+            if (next !== prev && soundEnabled) chessSounds.play('move')
+            return next
+          })
+        }
+        setShowBestMoveHint(false)
         setSelectedSquare(null)
         setPendingPromotion(null)
       } else if (e.key === 'ArrowRight') {
         e.preventDefault()
-        setViewIndex((prev) => {
-          const next = Math.min(moves.length, prev + 1)
-          if (next !== prev && soundEnabled) chessSounds.play('move')
-          return next
-        })
+        if (variation) {
+          if (variation.cursor < variation.moves.length) {
+            setVariation({ ...variation, cursor: variation.cursor + 1 })
+            if (soundEnabled) chessSounds.play('move')
+          }
+        } else {
+          setViewIndex((prev) => {
+            const next = Math.min(moves.length, prev + 1)
+            if (next !== prev && soundEnabled) chessSounds.play('move')
+            return next
+          })
+        }
+        setShowBestMoveHint(false)
         setSelectedSquare(null)
         setPendingPromotion(null)
       } else if (e.key === 'Home' || e.key === 'ArrowUp') {
         e.preventDefault()
-        setViewIndex((prev) => {
-          if (prev !== 0 && soundEnabled) chessSounds.play('move')
-          return 0
-        })
+        if (variation) {
+          setViewIndex(variation.branchPly)
+          setVariation(null)
+          if (soundEnabled) chessSounds.play('move')
+        } else {
+          setViewIndex((prev) => {
+            if (prev !== 0 && soundEnabled) chessSounds.play('move')
+            return 0
+          })
+        }
         setShowBestMoveHint(false)
         setSelectedSquare(null)
         setPendingPromotion(null)
       } else if (e.key === 'End' || e.key === 'ArrowDown') {
         e.preventDefault()
-        setViewIndex((prev) => {
-          if (prev !== moves.length && soundEnabled) chessSounds.play('move')
-          return moves.length
-        })
+        if (variation) {
+          if (variation.cursor !== variation.moves.length) {
+            setVariation({ ...variation, cursor: variation.moves.length })
+            if (soundEnabled) chessSounds.play('move')
+          }
+        } else {
+          setViewIndex((prev) => {
+            if (prev !== moves.length && soundEnabled) chessSounds.play('move')
+            return moves.length
+          })
+        }
         setShowBestMoveHint(false)
         setSelectedSquare(null)
         setPendingPromotion(null)
@@ -768,7 +824,7 @@ export function App() {
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [importModalTab, moves.length, soundEnabled])
+  }, [importModalTab, moves.length, soundEnabled, variation])
 
   const cancelReview = () => {
     reviewAbortRef.current?.abort()
@@ -830,9 +886,62 @@ export function App() {
     from: Square,
     to: Square,
     promotion?: PieceSymbol,
-    atPly = viewIndex,
+    atPly?: number,
   ) => {
-    const nextGame = buildGameAtPly(startFen, moves, atPly)
+    // 1. If already inside a variation (and not jumping to a specific mainline ply), extend variation
+    if (variation && atPly === undefined) {
+      const prefix = [
+        ...moves.slice(0, variation.branchPly),
+        ...variation.moves.slice(0, variation.cursor),
+      ]
+      const nextGame = buildGameAtPly(startFen, prefix, prefix.length)
+      const fenBefore = nextGame.fen()
+      const moverColor = nextGame.turn()
+      const beforeSnapshot =
+        sfEvalForFenRef.current.fen === fenBefore
+          ? {
+              cp: sfEvalForFenRef.current.cp,
+              mate: sfEvalForFenRef.current.mate,
+              bestMove: sfEvalForFenRef.current.bestMove,
+            }
+          : { cp: 0, mate: null, bestMove: null }
+
+      const executed = nextGame.move({ from, to, promotion })
+      const nextVarMoves: StoredMove[] = [
+        ...variation.moves.slice(0, variation.cursor),
+        {
+          from: executed.from,
+          to: executed.to,
+          san: executed.san,
+          promotion: executed.promotion,
+        },
+      ]
+
+      if (soundEnabled) playSoundForMove(executed, nextGame)
+
+      setVariation({
+        branchPly: variation.branchPly,
+        moves: nextVarMoves,
+        cursor: nextVarMoves.length,
+      })
+      setLiveMoveCtx({
+        fenAfter: nextGame.fen(),
+        fenBefore,
+        ply: variation.branchPly + nextVarMoves.length,
+        to: executed.to,
+        uci: `${executed.from}${executed.to}${executed.promotion ?? ''}`,
+        san: executed.san,
+        color: moverColor,
+        isCheckmate: nextGame.isCheckmate(),
+        before: beforeSnapshot,
+      })
+      setSelectedSquare(null)
+      setPendingPromotion(null)
+      return
+    }
+
+    const targetPly = atPly ?? viewIndex
+    const nextGame = buildGameAtPly(startFen, moves, targetPly)
     const fenBefore = nextGame.fen()
     const moverColor = nextGame.turn()
     const beforeSnapshot =
@@ -846,21 +955,65 @@ export function App() {
 
     const executed = nextGame.move({ from, to, promotion })
     const fenAfter = nextGame.fen()
-    const truncated = moves.slice(0, atPly)
-    const updatedMoves: StoredMove[] = [
-      ...truncated,
-      {
-        from: executed.from,
-        to: executed.to,
-        san: executed.san,
-        promotion: executed.promotion,
-      },
-    ]
+    const newMove: StoredMove = {
+      from: executed.from,
+      to: executed.to,
+      san: executed.san,
+      promotion: executed.promotion,
+    }
 
     if (soundEnabled) {
       playSoundForMove(executed, nextGame)
     }
 
+    // 2. If user played the exact next mainline move while reviewing, simply step forward along mainline
+    const existingNext = moves[targetPly]
+    if (
+      existingNext &&
+      existingNext.from === newMove.from &&
+      existingNext.to === newMove.to &&
+      (existingNext.promotion ?? undefined) === (newMove.promotion ?? undefined)
+    ) {
+      setVariation(null)
+      setViewIndex(targetPly + 1)
+      setShowBestMoveHint(false)
+      setSelectedSquare(null)
+      setPendingPromotion(null)
+      return
+    }
+
+    // 3. Branch non-destructively into a variation when exploring earlier in the game,
+    //    when Game Review is active, or when trying a suggested Coach move
+    const shouldBranch =
+      targetPly < moves.length ||
+      reviewResult !== null ||
+      atPly !== undefined
+
+    if (shouldBranch) {
+      setVariation({
+        branchPly: targetPly,
+        moves: [newMove],
+        cursor: 1,
+      })
+      setShowBestMoveHint(false)
+      setLiveMoveCtx({
+        fenAfter,
+        fenBefore,
+        ply: targetPly + 1,
+        to: executed.to,
+        uci: `${executed.from}${executed.to}${executed.promotion ?? ''}`,
+        san: executed.san,
+        color: moverColor,
+        isCheckmate: nextGame.isCheckmate(),
+        before: beforeSnapshot,
+      })
+      setSelectedSquare(null)
+      setPendingPromotion(null)
+      return
+    }
+
+    // 4. Normal live play at the end of mainline
+    const updatedMoves: StoredMove[] = [...moves, newMove]
     clearReview()
     setLiveMoveCtx({
       fenAfter,
@@ -922,6 +1075,24 @@ export function App() {
   }
 
   const handleUndo = () => {
+    if (variation) {
+      if (variation.cursor <= 1) {
+        setViewIndex(variation.branchPly)
+        setVariation(null)
+      } else {
+        const nextVarMoves = variation.moves.slice(0, variation.cursor - 1)
+        setVariation({
+          branchPly: variation.branchPly,
+          moves: nextVarMoves,
+          cursor: nextVarMoves.length,
+        })
+      }
+      setPendingPromotion(null)
+      setSelectedSquare(null)
+      if (soundEnabled) chessSounds.play('move')
+      return
+    }
+
     if (viewIndex === 0) return
     clearReview()
     const nextMoves = moves.slice(0, viewIndex - 1)
@@ -934,6 +1105,8 @@ export function App() {
 
   const handleReset = () => {
     clearReview()
+    setVariation(null)
+    setLiveMoveCtx(null)
     setStartFen(DEFAULT_POSITION)
     setMoves([])
     setViewIndex(0)
@@ -945,6 +1118,8 @@ export function App() {
 
   const handleImportFen = (loadedFen: string) => {
     clearReview()
+    setVariation(null)
+    setLiveMoveCtx(null)
     setStartFen(loadedFen)
     setMoves([])
     setViewIndex(0)
@@ -962,12 +1137,14 @@ export function App() {
       fallbackWhite?: string
       fallbackBlack?: string
       metaOverride?: string
+      explicitTimeControl?: string
     },
   ) => {
     clearReview()
     const parsed = new Chess()
     parsed.loadPgn(pgnText)
     const headers = parsed.getHeaders()
+    setTimeControl(detectTimeControl(headers, opts?.explicitTimeControl))
     const customStartFen =
       headers.SetUp === '1' && headers.FEN ? headers.FEN : DEFAULT_POSITION
 
@@ -979,6 +1156,8 @@ export function App() {
       promotion: m.promotion,
     }))
 
+    setVariation(null)
+    setLiveMoveCtx(null)
     setStartFen(customStartFen)
     setMoves(importedMoves)
     setViewIndex(0)
@@ -1029,18 +1208,72 @@ export function App() {
       fallbackWhite: game.whiteName,
       fallbackBlack: game.blackName,
       metaOverride: meta,
+      explicitTimeControl: game.timeControl,
     })
   }
 
   const jumpToPly = (ply: number) => {
     const clamped = Math.max(0, Math.min(moves.length, ply))
-    if (clamped !== viewIndex && soundEnabled) {
+    if ((clamped !== viewIndex || variation !== null) && soundEnabled) {
       chessSounds.play('move')
     }
+    setVariation(null)
     setViewIndex(clamped)
     setShowBestMoveHint(false)
     setSelectedSquare(null)
     setPendingPromotion(null)
+  }
+
+  const exitVariation = () => {
+    if (!variation) return
+    setViewIndex(variation.branchPly)
+    setVariation(null)
+    setSelectedSquare(null)
+    setPendingPromotion(null)
+    if (soundEnabled) chessSounds.play('move')
+  }
+
+  const stepPrev = () => {
+    if (variation) {
+      if (variation.cursor <= 1) {
+        exitVariation()
+      } else {
+        setVariation({ ...variation, cursor: variation.cursor - 1 })
+        if (soundEnabled) chessSounds.play('move')
+      }
+      return
+    }
+    jumpToPly(viewIndex - 1)
+  }
+
+  const stepNext = () => {
+    if (variation) {
+      if (variation.cursor < variation.moves.length) {
+        setVariation({ ...variation, cursor: variation.cursor + 1 })
+        if (soundEnabled) chessSounds.play('move')
+      }
+      return
+    }
+    jumpToPly(viewIndex + 1)
+  }
+
+  const stepStart = () => {
+    if (variation) {
+      exitVariation()
+      return
+    }
+    jumpToPly(0)
+  }
+
+  const stepEnd = () => {
+    if (variation) {
+      if (variation.cursor < variation.moves.length) {
+        setVariation({ ...variation, cursor: variation.moves.length })
+        if (soundEnabled) chessSounds.play('move')
+      }
+      return
+    }
+    jumpToPly(moves.length)
   }
 
   const handleCopy = async (type: 'fen' | 'pgn') => {
@@ -1274,6 +1507,47 @@ export function App() {
               </span>
             )}
           </div>
+
+          {/* Variation Branch Banner (Non-destructive exploration) */}
+          {variation && (
+            <div className="border-b border-purple-500/25 bg-purple-500/12 px-3.5 py-2">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-xs font-bold text-purple-300">
+                  🌿 Nhánh biến thử (từ nước {variation.branchPly})
+                </span>
+                <button
+                  type="button"
+                  onClick={exitVariation}
+                  className="rounded-md bg-purple-500/25 px-2.5 py-1 text-[11px] font-bold text-purple-100 transition hover:bg-purple-500/40"
+                >
+                  ↩ Về ván chính
+                </button>
+              </div>
+              <div className="mt-1.5 flex flex-wrap gap-1 font-mono text-[11px]">
+                {variation.moves.map((vm, idx) => {
+                  const step = idx + 1
+                  const active = variation.cursor === step
+                  return (
+                    <button
+                      key={`${vm.san}-${idx}`}
+                      type="button"
+                      onClick={() =>
+                        setVariation({ ...variation, cursor: step })
+                      }
+                      className={[
+                        'rounded px-1.5 py-0.5 transition',
+                        active
+                          ? 'bg-purple-500 text-white font-bold'
+                          : 'bg-black/25 text-purple-200 hover:bg-purple-500/30',
+                      ].join(' ')}
+                    >
+                      {vm.san}
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
+          )}
 
           {/* 3 Clear Sidebar Tabs */}
           <div className="grid grid-cols-3 gap-1 border-b border-white/[0.07] bg-[#1e1c1a] p-1.5">
@@ -1615,6 +1889,7 @@ export function App() {
               <GameReviewPanel
                 review={reviewResult}
                 selectedEngine={reviewEngine}
+                timeControl={timeControl}
                 whiteName={players.white}
                 blackName={players.black}
                 currentPly={viewIndex}
@@ -1628,6 +1903,7 @@ export function App() {
                 onChangeReviewEngine={(nextEngine) =>
                   setReviewEngine(nextEngine)
                 }
+                onChangeTimeControl={(tc) => setTimeControl(tc)}
                 onReRunReview={(nextEngine) =>
                   void startGameReview(
                     startFen,
@@ -2062,9 +2338,13 @@ export function App() {
           <div className="grid grid-cols-4 gap-1.5 border-t border-white/[0.07] bg-[#1e1c1a] px-3.5 py-2.5">
             <button
               type="button"
-              onClick={() => jumpToPly(0)}
-              disabled={viewIndex === 0}
-              title="Về đầu ván (↑ hoặc Home)"
+              onClick={stepStart}
+              disabled={!variation && viewIndex === 0}
+              title={
+                variation
+                  ? 'Quay lại điểm rẽ nhánh (↑ hoặc Home)'
+                  : 'Về đầu ván (↑ hoặc Home)'
+              }
               aria-label="Về đầu ván"
               className="rounded-lg bg-[#2d2b27] py-2 text-sm font-bold text-stone-200 transition hover:bg-[#3d3a36] disabled:opacity-35"
             >
@@ -2072,8 +2352,8 @@ export function App() {
             </button>
             <button
               type="button"
-              onClick={() => jumpToPly(viewIndex - 1)}
-              disabled={viewIndex === 0}
+              onClick={stepPrev}
+              disabled={!variation && viewIndex === 0}
               title="Nước trước (←)"
               aria-label="Nước trước"
               className="rounded-lg bg-[#2d2b27] py-2 text-sm font-bold text-stone-200 transition hover:bg-[#3d3a36] disabled:opacity-35"
@@ -2082,8 +2362,12 @@ export function App() {
             </button>
             <button
               type="button"
-              onClick={() => jumpToPly(viewIndex + 1)}
-              disabled={viewIndex >= moves.length}
+              onClick={stepNext}
+              disabled={
+                variation
+                  ? variation.cursor >= variation.moves.length
+                  : viewIndex >= moves.length
+              }
               title="Nước sau (→)"
               aria-label="Nước sau"
               className="rounded-lg bg-[#2d2b27] py-2 text-sm font-bold text-stone-200 transition hover:bg-[#3d3a36] disabled:opacity-35"
@@ -2092,8 +2376,12 @@ export function App() {
             </button>
             <button
               type="button"
-              onClick={() => jumpToPly(moves.length)}
-              disabled={viewIndex >= moves.length}
+              onClick={stepEnd}
+              disabled={
+                variation
+                  ? variation.cursor >= variation.moves.length
+                  : viewIndex >= moves.length
+              }
               title="Về nước cuối (↓ hoặc End)"
               aria-label="Về nước cuối"
               className="rounded-lg bg-[#2d2b27] py-2 text-sm font-bold text-stone-200 transition hover:bg-[#3d3a36] disabled:opacity-35"
@@ -2117,7 +2405,7 @@ export function App() {
               <button
                 type="button"
                 onClick={handleUndo}
-                disabled={viewIndex === 0}
+                disabled={!variation && viewIndex === 0}
                 className="rounded-lg bg-[#32302c] px-3 py-2.5 text-xs font-semibold text-stone-100 transition hover:bg-[#403d38] disabled:opacity-35"
               >
                 ↶ Hoàn tác

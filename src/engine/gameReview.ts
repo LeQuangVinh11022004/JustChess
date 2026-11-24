@@ -50,6 +50,94 @@ export const REVIEW_ENGINES: Array<{
   },
 ]
 
+export type TimeControlCategory = 'bullet' | 'blitz' | 'rapid' | 'classical'
+
+export const TIME_CONTROL_META: Record<
+  TimeControlCategory,
+  {
+    label: string
+    shortLabel: string
+    fideLabel: string
+    chesscomLabel: string
+    lichessLabel: string
+  }
+> = {
+  bullet: {
+    label: 'Bullet (< 3 phút)',
+    shortLabel: 'Bullet',
+    fideLabel: 'FIDE Blitz*',
+    chesscomLabel: 'Chess.com Bullet',
+    lichessLabel: 'Lichess Bullet',
+  },
+  blitz: {
+    label: 'Blitz (3–8 phút)',
+    shortLabel: 'Blitz',
+    fideLabel: 'FIDE Blitz',
+    chesscomLabel: 'Chess.com Blitz',
+    lichessLabel: 'Lichess Blitz',
+  },
+  rapid: {
+    label: 'Rapid (8–25 phút)',
+    shortLabel: 'Rapid',
+    fideLabel: 'FIDE Rapid',
+    chesscomLabel: 'Chess.com Rapid',
+    lichessLabel: 'Lichess Rapid',
+  },
+  classical: {
+    label: 'Classical (≥ 25 phút)',
+    shortLabel: 'Classical',
+    fideLabel: 'FIDE Classical',
+    chesscomLabel: 'Chess.com Daily',
+    lichessLabel: 'Lichess Classical',
+  },
+}
+
+/**
+ * Infers Bullet / Blitz / Rapid / Classical from PGN headers ([TimeControl], [Event])
+ * or an explicit online speed string (e.g. "blitz", "rapid", "bullet", "daily").
+ */
+export function detectTimeControl(
+  headers?: Record<string, string>,
+  explicitSpeed?: string,
+): TimeControlCategory {
+  const speed = (explicitSpeed ?? '').toLowerCase()
+  if (speed.includes('bullet') || speed.includes('ultrabullet')) return 'bullet'
+  if (speed.includes('blitz')) return 'blitz'
+  if (speed.includes('rapid')) return 'rapid'
+  if (
+    speed.includes('classical') ||
+    speed.includes('correspondence') ||
+    speed.includes('daily')
+  ) {
+    return 'classical'
+  }
+
+  const tc = headers?.TimeControl?.trim()
+  if (tc && tc !== '-' && tc !== '?') {
+    if (tc.includes('/')) return 'classical' // Daily / correspondence (e.g. 1/86400)
+    const [baseStr, incStr] = tc.split('+')
+    const base = Number.parseInt(baseStr ?? '', 10)
+    const inc = Number.parseInt(incStr ?? '0', 10) || 0
+    if (!Number.isNaN(base) && base > 0) {
+      // Official Lichess / FIDE estimated game duration = base + 40 * increment
+      const estSeconds = base + 40 * inc
+      if (estSeconds < 180) return 'bullet'
+      if (estSeconds < 480) return 'blitz'
+      if (estSeconds < 1500) return 'rapid'
+      return 'classical'
+    }
+  }
+
+  const eventName = (headers?.Event ?? '').toLowerCase()
+  if (eventName.includes('bullet')) return 'bullet'
+  if (eventName.includes('blitz')) return 'blitz'
+  if (eventName.includes('classical') || eventName.includes('daily')) {
+    return 'classical'
+  }
+
+  return 'rapid'
+}
+
 export interface EstimatedRatings {
   fide: number
   chesscom: number
@@ -433,36 +521,89 @@ function roundTo50(value: number, min: number, max: number): number {
 }
 
 /**
- * Estimates single-game performance Elo across Chess.com, Lichess, and FIDE scales
- * calibrated to real-world cross-platform rating conversion curves.
+ * Estimates single-game performance Elo across Chess.com, Lichess, and FIDE scales,
+ * calibrated separately for Bullet, Blitz, Rapid, and Classical time controls.
  */
-function estimateCrossPlatformRatings(params: {
+export function estimateCrossPlatformRatings(params: {
   accuracy: number
   blunder: number
   mistake: number
   brilliant: number
   great: number
+  timeControl?: TimeControlCategory
 }): EstimatedRatings {
-  const { accuracy, blunder, mistake, brilliant, great } = params
+  const {
+    accuracy,
+    blunder,
+    mistake,
+    brilliant,
+    great,
+    timeControl = 'rapid',
+  } = params
 
-  // Base Chess.com Rapid/Blitz performance score (400 – 2750)
-  const baseChessCom = 420 + Math.pow(accuracy / 100, 1.9) * 2250
-  const penalty = blunder * 85 + mistake * 30
+  // Time-control specific calibration:
+  // Faster controls tolerate more inaccuracy/blunders for the same Elo; Classical demands higher precision.
+  const tcConfig: Record<
+    TimeControlCategory,
+    {
+      accuracyBoost: number
+      blunderWeight: number
+      mistakeWeight: number
+      lichessExtra: number
+      fideShift: number
+    }
+  > = {
+    bullet: {
+      accuracyBoost: 190,
+      blunderWeight: 55,
+      mistakeWeight: 20,
+      lichessExtra: 35,
+      fideShift: -40,
+    },
+    blitz: {
+      accuracyBoost: 95,
+      blunderWeight: 70,
+      mistakeWeight: 25,
+      lichessExtra: 15,
+      fideShift: 0,
+    },
+    rapid: {
+      accuracyBoost: 0,
+      blunderWeight: 85,
+      mistakeWeight: 30,
+      lichessExtra: 0,
+      fideShift: 0,
+    },
+    classical: {
+      accuracyBoost: -110,
+      blunderWeight: 105,
+      mistakeWeight: 38,
+      lichessExtra: -20,
+      fideShift: 35,
+    },
+  }
+
+  const cfg = tcConfig[timeControl]
+
+  const baseChessCom =
+    420 + Math.pow(accuracy / 100, 1.9) * 2250 + cfg.accuracyBoost
+  const penalty = blunder * cfg.blunderWeight + mistake * cfg.mistakeWeight
   const bonus = brilliant * 60 + great * 25
   const rawChessCom = Math.max(400, Math.min(2750, baseChessCom - penalty + bonus))
 
-  // Lichess Glicko-2 typically runs +220 to +320 above Chess.com at 1000–1900, converging near 2500+
+  // Lichess Glicko-2 offset narrows at master level (~2400+)
   const lichessOffset =
-    rawChessCom < 2200
+    (rawChessCom < 2200
       ? 280 - ((rawChessCom - 800) / 1400) * 90
-      : Math.max(40, 190 - ((rawChessCom - 2200) / 550) * 150)
+      : Math.max(40, 190 - ((rawChessCom - 2200) / 550) * 150)) +
+    cfg.lichessExtra
   const rawLichess = rawChessCom + lichessOffset
 
-  // FIDE Classical/Rapid has a higher floor (~1000–1400) and stricter scaling above 1800
+  // FIDE scaling (floor ~1000–1400, tighter progression above 1800)
   const rawFide =
-    rawChessCom < 1400
+    (rawChessCom < 1400
       ? 950 + ((rawChessCom - 400) / 1000) * 500
-      : 1450 + (rawChessCom - 1400) * 0.92
+      : 1450 + (rawChessCom - 1400) * 0.92) + cfg.fideShift
 
   return {
     fide: roundTo50(rawFide, 1000, 2750),
