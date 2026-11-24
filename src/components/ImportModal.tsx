@@ -8,6 +8,7 @@ import {
   type OnlinePlatform,
   type OnlinePlayerProfile,
 } from '../utils/onlineGamesApi'
+import { parsePgnRobust } from '../utils/pgnParser'
 
 export type ImportTab = 'online' | 'pgn' | 'fen'
 
@@ -125,8 +126,7 @@ export function ImportModal({
     }
 
     try {
-      const testGame = new Chess()
-      testGame.loadPgn(trimmed)
+      parsePgnRobust(trimmed)
       onImportPgn(trimmed, autoReview)
       onClose()
     } catch (err) {

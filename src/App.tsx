@@ -88,6 +88,7 @@ import {
   fetchOnlinePlayerProfile,
   type OnlineGameSummary,
 } from './utils/onlineGamesApi'
+import { parsePgnRobust } from './utils/pgnParser'
 
 type EngineMode = 'stockfish' | 'maia' | 'cloud' | 'compare'
 
@@ -1692,9 +1693,11 @@ export function App() {
     setBotActive(false)
     setBotThinking(false)
     clearReview()
-    const parsed = new Chess()
-    parsed.loadPgn(pgnText)
-    const headers = parsed.getHeaders()
+    const {
+      chess: parsed,
+      headers,
+      startFen: customStartFen,
+    } = parsePgnRobust(pgnText)
     setTimeControl(detectTimeControl(headers, opts?.explicitTimeControl))
     const siteStr = (headers.Site ?? '').toLowerCase()
     setSourcePlatform(
@@ -1711,8 +1714,6 @@ export function App() {
         ? rawRes
         : null,
     )
-    const customStartFen =
-      headers.SetUp === '1' && headers.FEN ? headers.FEN : DEFAULT_POSITION
 
     const verboseMoves = parsed.history({ verbose: true })
     const importedMoves: StoredMove[] = verboseMoves.map((m) => ({
@@ -2891,6 +2892,8 @@ export function App() {
                 timeControl={timeControl}
                 whiteName={players.white.name}
                 blackName={players.black.name}
+                whiteTitle={players.white.title}
+                blackTitle={players.black.title}
                 whiteRating={players.white.rating}
                 blackRating={players.black.rating}
                 sourcePlatform={sourcePlatform}

@@ -1167,27 +1167,30 @@ function toCrossPlatformFromChessCom(
 
   const lichessOffset =
     (rawChessCom < 2200
-      ? 265 - ((Math.max(400, rawChessCom) - 400) / 1800) * 115
-      : Math.max(40, 150 - ((rawChessCom - 2200) / 600) * 110)) +
+      ? 250 - ((Math.max(400, rawChessCom) - 400) / 1800) * 130
+      : Math.max(-50, 120 - ((rawChessCom - 2200) / 1100) * 170)) +
     extra.lichessExtra
   const rawLichess = rawChessCom + lichessOffset
 
+  // FIDE tops out around 2850–2900 even when Chess.com Blitz/Bullet reaches 3200–3350
   const rawFide =
     (rawChessCom < 1400
       ? 950 + ((Math.max(400, rawChessCom) - 400) / 1000) * 500
-      : 1450 + (rawChessCom - 1400) * 0.94) + extra.fideShift
+      : rawChessCom <= 2600
+        ? 1450 + (rawChessCom - 1400) * 0.9
+        : 2530 + (rawChessCom - 2600) * 0.5) + extra.fideShift
 
   return {
-    fide: roundTo50(rawFide, 1000, 2850),
-    chesscom: roundTo50(rawChessCom, 300, 2900),
-    lichess: roundTo50(rawLichess, 700, 2950),
+    fide: roundTo50(rawFide, 1000, 2900),
+    chesscom: roundTo50(rawChessCom, 300, 3350),
+    lichess: roundTo50(rawLichess, 700, 3300),
   }
 }
 
 /**
- * Purely objective overall match performance Elo (Chess.com scale) computed cleanly
- * from overall Accuracy, ACPL, time control, and match result — no artificial per-move
- * +/- bonuses or penalties based on move labels, and no anchoring to profile Elo.
+ * Purely objective overall match performance Elo (Chess.com scale, 300–3350) computed cleanly
+ * from overall Accuracy, ACPL, time control, and match result — calibrated across beginner
+ * through Super-GM (3200–3350 Chess.com Blitz/Bullet).
  */
 function computeRawChessComPerf(params: {
   accuracy: number
@@ -1197,30 +1200,30 @@ function computeRawChessComPerf(params: {
 }): number {
   const {
     accuracy,
-    acpl = Math.max(8, Math.round((100 - accuracy) * 2.4)),
+    acpl = Math.max(8, Math.round((100 - accuracy) * 2.2)),
     timeControl = 'rapid',
     sideResult = 'unknown',
   } = params
 
-  // 1. Overall Accuracy -> Elo curve (smooth monotonic calibration across 300–2800)
+  // 1. Overall Accuracy -> Elo curve (smooth monotonic calibration across 300–3200+)
   const accClamped = Math.max(20, Math.min(99.5, accuracy))
-  const eloFromAcc = 250 + Math.pow((accClamped - 20) / 80, 1.82) * 2550
+  const eloFromAcc = 300 + Math.pow((accClamped - 20) / 80, 1.62) * 2900
 
   // 2. Overall ACPL -> Elo curve
   const acplClamped = Math.max(4, Math.min(260, acpl))
-  const eloFromAcpl = 2850 * Math.exp(-0.0145 * acplClamped) + 100
+  const eloFromAcpl = 3200 * Math.exp(-0.0118 * acplClamped) + 120
 
-  // 3. Time-control calibration
+  // 3. Time-control calibration (Chess.com Bullet/Blitz pools reach 3200–3350 at top GM level)
   const tcShiftMap: Record<TimeControlCategory, number> = {
-    bullet: 150,
-    blitz: 75,
+    bullet: 220,
+    blitz: 120,
     rapid: 0,
     classical: -80,
   }
 
   // 4. Small objective match-result adjustment
   const resultNudge =
-    sideResult === 'win' ? 65 : sideResult === 'loss' ? -65 : 0
+    sideResult === 'win' ? 70 : sideResult === 'loss' ? -70 : 0
 
   const objectiveElo =
     0.55 * eloFromAcc +
@@ -1228,7 +1231,7 @@ function computeRawChessComPerf(params: {
     tcShiftMap[timeControl] +
     resultNudge
 
-  return Math.max(300, Math.min(2900, objectiveElo))
+  return Math.max(300, Math.min(3350, objectiveElo))
 }
 
 /**
@@ -1245,17 +1248,97 @@ export function estimateCrossPlatformRatings(params: {
   return toCrossPlatformFromChessCom(rawChessCom, tc)
 }
 
+const TITLE_BASELINE_CHESSCOM: Record<string, number> = {
+  GM: 2800,
+  IM: 2550,
+  FM: 2400,
+  WGM: 2350,
+  NM: 2300,
+  CM: 2250,
+  WIM: 2150,
+  WFM: 2000,
+  WCM: 1850,
+}
+
+function toChessComBaseline(
+  rating: number | undefined,
+  title: string | undefined,
+  platform: 'chesscom' | 'lichess' | 'unknown',
+): number | null {
+  if (rating && rating > 0) {
+    if (platform === 'lichess') {
+      // Approximate inverse Lichess -> Chess.com mapping
+      const offset =
+        rating < 2300
+          ? 240 - ((Math.max(700, rating) - 700) / 1600) * 140
+          : Math.max(-40, 100 - ((rating - 2300) / 1000) * 140)
+      return Math.max(300, Math.min(3350, rating - offset))
+    }
+    return Math.max(300, Math.min(3350, rating))
+  }
+  if (title) {
+    const clean = title.trim().toUpperCase()
+    if (clean in TITLE_BASELINE_CHESSCOM) {
+      return TITLE_BASELINE_CHESSCOM[clean]
+    }
+  }
+  return null
+}
+
 /**
- * Estimates both White and Black objective game ratings together, preserving
- * logical winner > loser ordering when the winner matched or outplayed the loser.
+ * Expected objective performance (Chess.com scale) for a player at `baselineElo`
+ * in a given time control. Comparing actual `rawPerf` against this tells us
+ * whether the player overperformed or underperformed relative to their real rating.
+ */
+function expectedRawPerfForBaseline(
+  baselineElo: number,
+  timeControl: TimeControlCategory,
+): number {
+  // Real-world GM games in Blitz/Bullet have sharper complications (~86–92% acc),
+  // so their raw engine-accuracy curve sits slightly below their 3100–3300 rating.
+  const tcAllowance: Record<TimeControlCategory, number> = {
+    bullet: -160,
+    blitz: -110,
+    rapid: -40,
+    classical: 20,
+  }
+  const compressed =
+    baselineElo <= 2200
+      ? baselineElo
+      : 2200 + (baselineElo - 2200) * 0.68
+  return Math.max(400, Math.min(3150, compressed + tcAllowance[timeControl]))
+}
+
+/**
+ * Estimates both White and Black game ratings together:
+ * - When profile Elo / official Title is known, evaluates each player's actual performance
+ *   relative to their real rating & opponent strength (just like Chess.com Game Rating),
+ *   boosting players who overperform/upset and penalizing underperformance.
+ * - When no profile Elo/Title exists, falls back 100% to pure objective move quality.
+ * - Always preserves logical winner > loser ordering when the winner matched or outplayed the loser.
  */
 export function estimateMatchRatings(params: {
   white: SideReviewSummary
   black: SideReviewSummary
   timeControl: TimeControlCategory
   gameOutcome?: GameOutcome
+  whiteRating?: number
+  blackRating?: number
+  whiteTitle?: string
+  blackTitle?: string
+  sourcePlatform?: 'chesscom' | 'lichess' | 'unknown'
 }): { white: EstimatedRatings; black: EstimatedRatings } {
-  const { white, black, timeControl, gameOutcome = null } = params
+  const {
+    white,
+    black,
+    timeControl,
+    gameOutcome = null,
+    whiteRating,
+    blackRating,
+    whiteTitle,
+    blackTitle,
+    sourcePlatform = 'unknown',
+  } = params
 
   const whiteSideResult =
     gameOutcome === '1-0'
@@ -1274,31 +1357,67 @@ export function estimateMatchRatings(params: {
           ? 'draw'
           : 'unknown'
 
-  let wRaw = computeRawChessComPerf({
+  const wObj = computeRawChessComPerf({
     accuracy: white.accuracy,
     acpl: white.acpl,
     timeControl,
     sideResult: whiteSideResult,
   })
 
-  let bRaw = computeRawChessComPerf({
+  const bObj = computeRawChessComPerf({
     accuracy: black.accuracy,
     acpl: black.acpl,
     timeControl,
     sideResult: blackSideResult,
   })
 
+  const wBase = toChessComBaseline(whiteRating, whiteTitle, sourcePlatform)
+  const bBase = toChessComBaseline(blackRating, blackTitle, sourcePlatform)
+
+  const computeContextual = (
+    objPerf: number,
+    selfBase: number | null,
+    oppBase: number | null,
+    sideResult: 'win' | 'loss' | 'draw' | 'unknown',
+  ): number => {
+    if (selfBase === null) return objPerf
+
+    // 1. Compare actual performance vs what is expected at this player's Elo/Title
+    const expected = expectedRawPerfForBaseline(selfBase, timeControl)
+    const perfDelta = objPerf - expected // positive = overperformed, negative = underperformed
+
+    // 2. Factor opponent strength & upset bonus/penalty (FIDE performance intuition)
+    const oppAnchor = oppBase ?? selfBase
+    const eloDiff = oppAnchor - selfBase // positive = playing a stronger opponent
+    let resultShift = 0
+    if (sideResult === 'win') {
+      resultShift = 90 + Math.max(0, Math.min(350, eloDiff * 0.55))
+    } else if (sideResult === 'loss') {
+      resultShift = -90 + Math.min(0, Math.max(-300, eloDiff * 0.35))
+    } else if (sideResult === 'draw') {
+      resultShift = Math.max(-120, Math.min(180, eloDiff * 0.35))
+    }
+
+    // 3. Apply bounded performance swing around the player's real Elo baseline
+    const clampedPerfSwing = Math.max(-650, Math.min(650, perfDelta * 0.65))
+    const contextual = selfBase + clampedPerfSwing + resultShift
+    return Math.max(300, Math.min(3350, contextual))
+  }
+
+  let wRaw = computeContextual(wObj, wBase, bBase, whiteSideResult)
+  let bRaw = computeContextual(bObj, bBase, wBase, blackSideResult)
+
   // Enforce logical winner > loser consistency in decisive games
   if (gameOutcome === '1-0' && white.accuracy >= black.accuracy - 4) {
     if (wRaw <= bRaw + 50) {
       const mid = (wRaw + bRaw) / 2
-      wRaw = Math.min(2900, Math.max(wRaw, mid + 60))
+      wRaw = Math.min(3350, Math.max(wRaw, mid + 60))
       bRaw = Math.max(300, Math.min(bRaw, wRaw - 100))
     }
   } else if (gameOutcome === '0-1' && black.accuracy >= white.accuracy - 4) {
     if (bRaw <= wRaw + 50) {
       const mid = (wRaw + bRaw) / 2
-      bRaw = Math.min(2900, Math.max(bRaw, mid + 60))
+      bRaw = Math.min(3350, Math.max(bRaw, mid + 60))
       wRaw = Math.max(300, Math.min(wRaw, bRaw - 100))
     }
   }

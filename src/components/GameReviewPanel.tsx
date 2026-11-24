@@ -35,6 +35,8 @@ interface GameReviewPanelProps {
   timeControl: TimeControlCategory
   whiteName: string
   blackName: string
+  whiteTitle?: string
+  blackTitle?: string
   whiteRating?: number
   blackRating?: number
   sourcePlatform?: 'chesscom' | 'lichess' | 'unknown'
@@ -57,6 +59,8 @@ export function GameReviewPanel({
   timeControl,
   whiteName,
   blackName,
+  whiteTitle,
+  blackTitle,
   whiteRating,
   blackRating,
   sourcePlatform = 'unknown',
@@ -78,6 +82,11 @@ export function GameReviewPanel({
     black: review.black,
     timeControl,
     gameOutcome,
+    whiteRating,
+    blackRating,
+    whiteTitle,
+    blackTitle,
+    sourcePlatform,
   })
   const currentMove: ReviewMoveInfo | null =
     currentPly > 0 ? review.moves[currentPly - 1] ?? null : null
