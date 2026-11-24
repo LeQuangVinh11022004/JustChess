@@ -6,13 +6,15 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "lint": "oxlint",
-    "preview": "vite preview"
+    "lint": "oxlint src",
+    "preview": "vite preview",
+    "postinstall": "node -e \"const fs=require('fs');fs.mkdirSync('public/stockfish',{recursive:true});for(const f of['stockfish-19-lite-single.js','stockfish-19-lite-single.wasm']){fs.copyFileSync('node_modules/stockfish/bin/'+f,'public/stockfish/'+f);}\""
   },
   "dependencies": {
     "chess.js": "^1.4.0",
     "react": "^19.3.1",
-    "react-dom": "^19.3.1"
+    "react-dom": "^19.3.1",
+    "stockfish": "^19.0.1"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.5",

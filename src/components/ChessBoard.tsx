@@ -32,6 +32,7 @@ interface ChessBoardProps {
   selectedSquare: Square | null
   legalTargets: Set<Square>
   lastMove: LastMove | null
+  bestMoveArrow?: LastMove | null
   checkedKingSquare: Square | null
   pendingPromotion: PendingPromotion | null
   onSquareSelect: (square: Square) => void
@@ -56,6 +57,7 @@ export function ChessBoard({
   selectedSquare,
   legalTargets,
   lastMove,
+  bestMoveArrow = null,
   checkedKingSquare,
   pendingPromotion,
   onSquareSelect,
@@ -294,6 +296,66 @@ export function ChessBoard({
             )
           }),
         )}
+
+        {/* Stockfish Best-Move Arrow Overlay */}
+        {bestMoveArrow && (() => {
+          const fromCol = displayFiles.indexOf(
+            bestMoveArrow.from[0] as (typeof FILES)[number],
+          )
+          const fromRow = displayRanks.indexOf(
+            bestMoveArrow.from[1] as (typeof RANKS)[number],
+          )
+          const toCol = displayFiles.indexOf(
+            bestMoveArrow.to[0] as (typeof FILES)[number],
+          )
+          const toRow = displayRanks.indexOf(
+            bestMoveArrow.to[1] as (typeof RANKS)[number],
+          )
+          if (fromCol < 0 || fromRow < 0 || toCol < 0 || toRow < 0) return null
+
+          const x1 = (fromCol + 0.5) * 100
+          const y1 = (fromRow + 0.5) * 100
+          const x2 = (toCol + 0.5) * 100
+          const y2 = (toRow + 0.5) * 100
+          const dx = x2 - x1
+          const dy = y2 - y1
+          const len = Math.hypot(dx, dy)
+          if (len === 0) return null
+          // Shorten tip slightly so arrowhead lands neatly inside target square
+          const endX = x2 - (dx / len) * 20
+          const endY = y2 - (dy / len) * 20
+
+          return (
+            <svg
+              viewBox="0 0 800 800"
+              className="pointer-events-none absolute inset-0 z-25 h-full w-full opacity-80"
+              aria-hidden="true"
+            >
+              <defs>
+                <marker
+                  id="stockfish-arrowhead"
+                  markerWidth="4"
+                  markerHeight="4"
+                  refX="2.2"
+                  refY="2"
+                  orient="auto"
+                >
+                  <polygon points="0 0, 4 2, 0 4" fill="#15803d" />
+                </marker>
+              </defs>
+              <line
+                x1={x1}
+                y1={y1}
+                x2={endX}
+                y2={endY}
+                stroke="#15803d"
+                strokeWidth="18"
+                strokeLinecap="round"
+                markerEnd="url(#stockfish-arrowhead)"
+              />
+            </svg>
+          )
+        })()}
 
         {/* Inline Chess.com / Lichess style Promotion Picker */}
         {pendingPromotion && promotionColIndex >= 0 && (

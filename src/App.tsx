@@ -5,8 +5,15 @@ import {
   type LastMove,
   type PendingPromotion,
 } from './components/ChessBoard'
+import { EvaluationBar } from './components/EvaluationBar'
 import { ImportModal, type ImportTab } from './components/ImportModal'
 import { PlayerBar } from './components/PlayerBar'
+import {
+  formatEvaluationScore,
+  INITIAL_EVALUATION,
+  StockfishService,
+  type EngineEvaluation,
+} from './engine/stockfishService'
 import {
   BOARD_THEMES,
   getMaterialSummary,
@@ -29,6 +36,8 @@ const DEFAULT_PLAYERS: PlayerNames = {
   white: 'Quân Trắng',
   black: 'Quân Đen',
 }
+
+const ENGINE_DEPTH = 15
 
 function buildGameAtPly(
   startFen: string,
@@ -100,6 +109,33 @@ function getInitialMoveInfo(startFen: string): {
   }
 }
 
+function parseUciMove(
+  uci: string | null,
+): { from: Square; to: Square; promotion?: PieceSymbol } | null {
+  if (!uci || uci.length < 4) return null
+  const from = uci.slice(0, 2) as Square
+  const to = uci.slice(2, 4) as Square
+  const promo = uci[4] as PieceSymbol | undefined
+  return { from, to, promotion: promo }
+}
+
+function uciToSan(fen: string, uci: string | null): string | null {
+  const parsed = parseUciMove(uci)
+  if (!parsed) return null
+  try {
+    const temp = new Chess()
+    temp.load(fen)
+    const move = temp.move({
+      from: parsed.from,
+      to: parsed.to,
+      promotion: parsed.promotion,
+    })
+    return move.san
+  } catch {
+    return uci
+  }
+}
+
 export function App() {
   const [startFen, setStartFen] = useState<string>(DEFAULT_POSITION)
   const [moves, setMoves] = useState<StoredMove[]>([])
@@ -115,10 +151,19 @@ export function App() {
   const [importModalTab, setImportModalTab] = useState<ImportTab | null>(null)
   const [copiedType, setCopiedType] = useState<'fen' | 'pgn' | null>(null)
 
+  // Stockfish Engine state
+  const [engineEnabled, setEngineEnabled] = useState<boolean>(true)
+  const [showBestMoveArrow, setShowBestMoveArrow] = useState<boolean>(true)
+  const [evaluation, setEvaluation] =
+    useState<EngineEvaluation>(INITIAL_EVALUATION)
+  const engineRef = useRef<StockfishService | null>(null)
+
   const activeMoveRef = useRef<HTMLButtonElement>(null)
 
   const displayGame = buildGameAtPly(startFen, moves, viewIndex)
   const fen = displayGame.fen()
+  const isCheckmate = displayGame.isCheckmate()
+  const isGameOver = displayGame.isGameOver()
   const theme = BOARD_THEMES[themeId]
   const board = displayGame.board()
   const turn = displayGame.turn()
@@ -132,6 +177,70 @@ export function App() {
           from: moves[viewIndex - 1].from,
           to: moves[viewIndex - 1].to,
         }
+      : null
+
+  // Lifecycle: start Stockfish Worker once
+  useEffect(() => {
+    const service = new StockfishService()
+    engineRef.current = service
+    service.start((nextEval) => {
+      setEvaluation(nextEval)
+    })
+
+    return () => {
+      service.destroy()
+      engineRef.current = null
+    }
+  }, [])
+
+  // Trigger Stockfish analysis whenever FEN or engineEnabled changes
+  useEffect(() => {
+    const service = engineRef.current
+    if (!service) return
+
+    if (!engineEnabled) {
+      service.stop()
+      return
+    }
+
+    if (isGameOver) {
+      service.stop()
+      return
+    }
+
+    service.analyze(fen, ENGINE_DEPTH)
+  }, [fen, engineEnabled, isGameOver])
+
+  // Override evaluation cleanly for terminal positions (Checkmate / Draw)
+  const effectiveEvaluation: EngineEvaluation = isGameOver
+    ? {
+        ...evaluation,
+        cp: isCheckmate ? null : 0,
+        mate: isCheckmate ? (turn === 'w' ? -0 : 0) : null,
+        bestMove: null,
+        isSearching: false,
+      }
+    : evaluation
+
+  // Preserve sign of checkmate winner for EvaluationBar (White won => +1, Black won => -1)
+  const barEvaluation: EngineEvaluation =
+    isCheckmate
+      ? {
+          ...effectiveEvaluation,
+          mate: turn === 'w' ? -1 : 1,
+          cp: null,
+        }
+      : effectiveEvaluation
+
+  const parsedBestMove =
+    engineEnabled && !isGameOver ? parseUciMove(effectiveEvaluation.bestMove) : null
+  const bestMoveArrow: LastMove | null =
+    showBestMoveArrow && parsedBestMove
+      ? { from: parsedBestMove.from, to: parsedBestMove.to }
+      : null
+  const bestMoveSan =
+    engineEnabled && !isGameOver
+      ? uciToSan(fen, effectiveEvaluation.bestMove)
       : null
 
   // Build move rows supporting custom starting FEN (including Black to move first)
@@ -238,7 +347,7 @@ export function App() {
   }
 
   const tryMove = (from: Square, to: Square) => {
-    if (displayGame.isGameOver()) return
+    if (isGameOver) return
 
     const candidateMoves = displayGame
       .moves({ square: from, verbose: true })
@@ -259,7 +368,7 @@ export function App() {
   }
 
   const handleSquareSelect = (square: Square) => {
-    if (displayGame.isGameOver() || pendingPromotion) return
+    if (isGameOver || pendingPromotion) return
 
     if (selectedSquare && legalTargets.has(square)) {
       tryMove(selectedSquare, square)
@@ -327,8 +436,14 @@ export function App() {
     setMoves(importedMoves)
     setViewIndex(0)
     setPlayers({
-      white: headers.White && headers.White !== '?' ? headers.White : DEFAULT_PLAYERS.white,
-      black: headers.Black && headers.Black !== '?' ? headers.Black : DEFAULT_PLAYERS.black,
+      white:
+        headers.White && headers.White !== '?'
+          ? headers.White
+          : DEFAULT_PLAYERS.white,
+      black:
+        headers.Black && headers.Black !== '?'
+          ? headers.Black
+          : DEFAULT_PLAYERS.black,
     })
 
     const metaParts = [headers.Event, headers.Date?.slice(0, 4)].filter(
@@ -377,7 +492,7 @@ export function App() {
                 JustChess
               </h1>
               <p className="text-[11px] text-stone-400">
-                {gameMeta ?? 'Bàn cờ chuẩn thi đấu'}
+                {gameMeta ?? 'Bàn cờ chuẩn thi đấu • Stockfish 19'}
               </p>
             </div>
           </div>
@@ -426,58 +541,81 @@ export function App() {
       </header>
 
       {/* Main Arena */}
-      <main className="mx-auto grid max-w-6xl items-start gap-6 px-4 py-6 lg:grid-cols-[minmax(0,600px)_340px] lg:justify-center">
-        {/* Left column: Player Bars + Chessboard */}
+      <main className="mx-auto grid max-w-6xl items-start gap-6 px-4 py-6 lg:grid-cols-[minmax(0,636px)_340px] lg:justify-center">
+        {/* Left column: Evaluation Bar + Player Bars + Chessboard */}
         <section className="flex flex-col items-center gap-2.5">
-          <PlayerBar
-            name={topColor === 'w' ? players.white : players.black}
-            color={topColor}
-            isTurn={!displayGame.isGameOver() && turn === topColor}
-            isInCheck={displayGame.inCheck() && turn === topColor}
-            capturedPieces={
-              topColor === 'w'
-                ? material.capturedByWhite
-                : material.capturedByBlack
-            }
-            materialAdvantage={
-              topColor === 'w'
-                ? material.whiteAdvantage
-                : material.blackAdvantage
-            }
-          />
+          {/* Top PlayerBar aligned with chessboard */}
+          <div className="flex w-full max-w-[636px] gap-2.5">
+            <div className="w-6 shrink-0 sm:w-7" aria-hidden="true" />
+            <div className="min-w-0 flex-1">
+              <PlayerBar
+                name={topColor === 'w' ? players.white : players.black}
+                color={topColor}
+                isTurn={!isGameOver && turn === topColor}
+                isInCheck={displayGame.inCheck() && turn === topColor}
+                capturedPieces={
+                  topColor === 'w'
+                    ? material.capturedByWhite
+                    : material.capturedByBlack
+                }
+                materialAdvantage={
+                  topColor === 'w'
+                    ? material.whiteAdvantage
+                    : material.blackAdvantage
+                }
+              />
+            </div>
+          </div>
 
-          <ChessBoard
-            board={board}
-            turn={turn}
-            orientation={orientation}
-            theme={theme}
-            selectedSquare={selectedSquare}
-            legalTargets={legalTargets}
-            lastMove={lastMove}
-            checkedKingSquare={checkedKingSquare}
-            pendingPromotion={pendingPromotion}
-            onSquareSelect={handleSquareSelect}
-            onMoveAttempt={tryMove}
-            onSelectPromotion={handleSelectPromotion}
-            onCancelPromotion={() => setPendingPromotion(null)}
-          />
+          {/* Evaluation Bar + Chessboard row */}
+          <div className="flex w-full max-w-[636px] items-stretch gap-2.5">
+            <EvaluationBar
+              evaluation={barEvaluation}
+              orientation={orientation}
+              enabled={engineEnabled}
+            />
+            <div className="min-w-0 flex-1">
+              <ChessBoard
+                board={board}
+                turn={turn}
+                orientation={orientation}
+                theme={theme}
+                selectedSquare={selectedSquare}
+                legalTargets={legalTargets}
+                lastMove={lastMove}
+                bestMoveArrow={bestMoveArrow}
+                checkedKingSquare={checkedKingSquare}
+                pendingPromotion={pendingPromotion}
+                onSquareSelect={handleSquareSelect}
+                onMoveAttempt={tryMove}
+                onSelectPromotion={handleSelectPromotion}
+                onCancelPromotion={() => setPendingPromotion(null)}
+              />
+            </div>
+          </div>
 
-          <PlayerBar
-            name={bottomColor === 'w' ? players.white : players.black}
-            color={bottomColor}
-            isTurn={!displayGame.isGameOver() && turn === bottomColor}
-            isInCheck={displayGame.inCheck() && turn === bottomColor}
-            capturedPieces={
-              bottomColor === 'w'
-                ? material.capturedByWhite
-                : material.capturedByBlack
-            }
-            materialAdvantage={
-              bottomColor === 'w'
-                ? material.whiteAdvantage
-                : material.blackAdvantage
-            }
-          />
+          {/* Bottom PlayerBar aligned with chessboard */}
+          <div className="flex w-full max-w-[636px] gap-2.5">
+            <div className="w-6 shrink-0 sm:w-7" aria-hidden="true" />
+            <div className="min-w-0 flex-1">
+              <PlayerBar
+                name={bottomColor === 'w' ? players.white : players.black}
+                color={bottomColor}
+                isTurn={!isGameOver && turn === bottomColor}
+                isInCheck={displayGame.inCheck() && turn === bottomColor}
+                capturedPieces={
+                  bottomColor === 'w'
+                    ? material.capturedByWhite
+                    : material.capturedByBlack
+                }
+                materialAdvantage={
+                  bottomColor === 'w'
+                    ? material.whiteAdvantage
+                    : material.blackAdvantage
+                }
+              />
+            </div>
+          </div>
         </section>
 
         {/* Right column: Lichess / Chess.com Sidebar */}
@@ -501,10 +639,114 @@ export function App() {
             )}
           </div>
 
+          {/* Stockfish 19 UCI Engine Panel */}
+          <div className="border-b border-white/5 bg-[#1e1c1a] px-3.5 py-2.5">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <span
+                  className={[
+                    'h-2 w-2 rounded-full',
+                    !engineEnabled
+                      ? 'bg-stone-600'
+                      : effectiveEvaluation.error
+                        ? 'bg-red-500'
+                        : effectiveEvaluation.isSearching
+                          ? 'animate-pulse bg-amber-400'
+                          : 'bg-[#81b64c]',
+                  ].join(' ')}
+                />
+                <span className="text-xs font-semibold text-stone-200">
+                  Stockfish 19
+                </span>
+                {engineEnabled && !effectiveEvaluation.error && (
+                  <span className="font-mono text-[11px] text-stone-400">
+                    d{effectiveEvaluation.depth}/{ENGINE_DEPTH}
+                  </span>
+                )}
+              </div>
+
+              <div className="flex items-center gap-1.5">
+                {engineEnabled && (
+                  <button
+                    type="button"
+                    onClick={() => setShowBestMoveArrow((prev) => !prev)}
+                    title="Bật/tắt mũi tên nước đi tối ưu"
+                    className={[
+                      'rounded px-2 py-0.5 text-[11px] font-medium transition',
+                      showBestMoveArrow
+                        ? 'bg-[#81b64c]/20 text-[#a3d160]'
+                        : 'bg-[#302e2b] text-stone-400 hover:text-stone-200',
+                    ].join(' ')}
+                  >
+                    ↗ Mũi tên
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setEngineEnabled((prev) => !prev)}
+                  className={[
+                    'rounded px-2 py-0.5 text-[11px] font-semibold transition',
+                    engineEnabled
+                      ? 'bg-[#81b64c] text-[#161512]'
+                      : 'bg-[#302e2b] text-stone-400 hover:text-stone-200',
+                  ].join(' ')}
+                >
+                  {engineEnabled ? 'Bật' : 'Tắt'}
+                </button>
+              </div>
+            </div>
+
+            {engineEnabled && (
+              <div className="mt-2 flex items-center justify-between gap-2 text-xs">
+                {effectiveEvaluation.error ? (
+                  <span className="text-red-400">
+                    {effectiveEvaluation.error}
+                  </span>
+                ) : (
+                  <>
+                    <div className="flex items-center gap-2">
+                      <span className="rounded bg-[#2c2a27] px-2 py-0.5 font-mono text-xs font-bold text-white ring-1 ring-white/10">
+                        {isCheckmate
+                          ? '#'
+                          : formatEvaluationScore(effectiveEvaluation)}
+                      </span>
+                      <span className="text-[11px] text-stone-400">
+                        {!effectiveEvaluation.isReady
+                          ? 'Đang tải WASM...'
+                          : effectiveEvaluation.isSearching
+                            ? 'Đang phân tích...'
+                            : 'Hoàn tất'}
+                      </span>
+                    </div>
+
+                    {bestMoveSan && parsedBestMove && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          commitMove(
+                            parsedBestMove.from,
+                            parsedBestMove.to,
+                            parsedBestMove.promotion,
+                          )
+                        }
+                        title={`Đi nước tối ưu (${effectiveEvaluation.bestMove})`}
+                        className="rounded bg-[#302e2b] px-2 py-0.5 font-mono text-[11px] font-semibold text-[#a3d160] transition hover:bg-[#3d3a36]"
+                      >
+                        Best: {bestMoveSan}
+                      </button>
+                    )}
+                  </>
+                )}
+              </div>
+            )}
+          </div>
+
           {/* Reviewing banner if not at latest ply */}
           {isReviewingEarlier && (
             <div className="flex items-center justify-between border-b border-amber-500/20 bg-amber-500/10 px-4 py-1.5 text-[11px] text-amber-300">
-              <span>Đang xem lại nước {viewIndex}/{moves.length}</span>
+              <span>
+                Đang xem lại nước {viewIndex}/{moves.length}
+              </span>
               <button
                 type="button"
                 onClick={() => jumpToPly(moves.length)}
@@ -516,14 +758,14 @@ export function App() {
           )}
 
           {/* Move List Table */}
-          <div className="min-h-56 flex-1 overflow-y-auto px-2 py-2">
+          <div className="min-h-48 flex-1 overflow-y-auto px-2 py-2">
             {moveRows.length === 0 ? (
-              <div className="flex h-full flex-col items-center justify-center gap-2 py-12 text-center text-stone-500">
+              <div className="flex h-full flex-col items-center justify-center gap-2 py-10 text-center text-stone-500">
                 <p className="text-sm font-medium text-stone-400">
                   Sẵn sàng bắt đầu
                 </p>
                 <p className="max-w-[240px] text-xs">
-                  Kéo thả quân cờ để đi, hoặc nạp thế cờ FEN / dán PGN để xem lại.
+                  Kéo thả quân cờ để đi, hoặc nạp thế cờ FEN / dán PGN để phân tích.
                 </p>
                 <div className="mt-2 flex gap-2">
                   <button
