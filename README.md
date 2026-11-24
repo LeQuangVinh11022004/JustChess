@@ -98,10 +98,10 @@ npm run preview
 
 ## Roadmap (Định hướng phát triển)
 
-- [ ] Âm thanh đi quân, ăn quân, nhập thành, chiếu và kết thúc ván đấu.
-- [ ] Vẽ mũi tên và đánh dấu ô bằng chuột phải (giống Lichess / Chess.com).
-- [ ] Đồng hồ đếm ngược (Bullet, Blitz, Rapid, Classical) có cộng giờ (Increment).
-- [ ] Tích hợp AI **Stockfish WASM** (chơi với máy & thanh đánh giá nước đi).
+- [x] Âm thanh đi quân, ăn quân, nhập thành, chiếu và kết thúc ván đấu.
+- [x] Vẽ mũi tên và đánh dấu ô bằng chuột phải (giống Lichess / Chess.com).
+- [x] Đồng hồ đếm ngược (Bullet, Blitz, Rapid, Classical) có cộng giờ (Increment).
+- [x] Tích hợp AI **Stockfish WASM** (chơi với máy & thanh đánh giá nước đi).
 - [ ] Chế độ chơi Online Realtime (WebSocket).
 
 ## Đóng góp
