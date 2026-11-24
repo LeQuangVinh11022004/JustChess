@@ -1710,6 +1710,15 @@ export function App() {
               evaluation={activeEvalForBar}
               orientation={orientation}
               enabled={engineEnabled}
+              gameResult={
+                isCheckmate
+                  ? turn === 'w'
+                    ? '0-1'
+                    : '1-0'
+                  : isGameOver
+                    ? '1/2-1/2'
+                    : null
+              }
             />
             <div className="min-w-0 flex-1">
               <ChessBoard

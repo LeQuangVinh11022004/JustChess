@@ -7,6 +7,7 @@ interface EvaluationBarProps {
   evaluation: EngineEvaluation
   orientation: 'w' | 'b'
   enabled: boolean
+  gameResult?: '1-0' | '0-1' | '1/2-1/2' | null
 }
 
 /**
@@ -27,14 +28,38 @@ export function EvaluationBar({
   evaluation,
   orientation,
   enabled,
+  gameResult = null,
 }: EvaluationBarProps) {
-  const whitePercent = enabled ? getWhitePercentage(evaluation) : 50
-  const scoreText = enabled ? formatEvaluationScore(evaluation) : '—'
+  const whitePercent =
+    gameResult === '1-0'
+      ? 100
+      : gameResult === '0-1'
+        ? 0
+        : gameResult === '1/2-1/2'
+          ? 50
+          : enabled
+            ? getWhitePercentage(evaluation)
+            : 50
+
+  const scoreText =
+    gameResult === '1-0'
+      ? '1-0'
+      : gameResult === '0-1'
+        ? '0-1'
+        : gameResult === '1/2-1/2'
+          ? '½-½'
+          : enabled
+            ? formatEvaluationScore(evaluation)
+            : '—'
 
   const whiteAdvantage =
-    evaluation.mate !== null
-      ? evaluation.mate > 0
-      : (evaluation.cp ?? 0) >= 0
+    gameResult === '1-0'
+      ? true
+      : gameResult === '0-1'
+        ? false
+        : evaluation.mate !== null
+          ? evaluation.mate > 0
+          : (evaluation.cp ?? 0) >= 0
 
   // When orientation is 'w', White bar grows from bottom; when 'b', White bar grows from top.
   const whiteIsOnBottom = orientation === 'w'
