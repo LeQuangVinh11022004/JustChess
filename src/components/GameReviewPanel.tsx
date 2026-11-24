@@ -1,13 +1,16 @@
 import {
   CLASSIFICATION_META,
   CLASSIFICATION_ORDER,
+  REVIEW_ENGINES,
   type GameReviewResult,
+  type ReviewEngineId,
   type ReviewMoveInfo,
 } from '../engine/gameReview'
 import { WinRateGraph } from './WinRateGraph'
 
 interface GameReviewPanelProps {
   review: GameReviewResult
+  selectedEngine: ReviewEngineId
   whiteName: string
   blackName: string
   currentPly: number
@@ -16,11 +19,13 @@ interface GameReviewPanelProps {
   onToggleBestMoveHint: () => void
   onSelectPly: (ply: number) => void
   onPlayBestMove: (uci: string, atPly: number) => void
-  onReRunReview: () => void
+  onChangeReviewEngine: (engineId: ReviewEngineId) => void
+  onReRunReview: (engineId?: ReviewEngineId) => void
 }
 
 export function GameReviewPanel({
   review,
+  selectedEngine,
   whiteName,
   blackName,
   currentPly,
@@ -29,6 +34,7 @@ export function GameReviewPanel({
   onToggleBestMoveHint,
   onSelectPly,
   onPlayBestMove,
+  onChangeReviewEngine,
   onReRunReview,
 }: GameReviewPanelProps) {
   const currentMove: ReviewMoveInfo | null =
@@ -54,6 +60,34 @@ export function GameReviewPanel({
 
   return (
     <div className="flex flex-1 flex-col gap-3.5 overflow-y-auto p-4">
+      {/* Review Engine Switcher Bar */}
+      <div className="flex items-center justify-between gap-2 rounded-xl bg-[#1f1d1a] px-3 py-2 ring-1 ring-white/[0.06]">
+        <div className="min-w-0">
+          <div className="text-[10px] font-medium tracking-wide text-stone-500 uppercase">
+            Engine chấm điểm
+          </div>
+          <div className="truncate text-xs font-bold text-[#b4e07c]">
+            {review.engineLabel}
+          </div>
+        </div>
+        <select
+          aria-label="Chọn Engine chấm điểm"
+          value={selectedEngine}
+          onChange={(e) => {
+            const next = e.target.value as ReviewEngineId
+            onChangeReviewEngine(next)
+            onReRunReview(next)
+          }}
+          className="rounded-lg border border-white/10 bg-[#2c2a26] px-2.5 py-1.5 text-xs font-semibold text-stone-100 focus:border-[#81b64c] focus:outline-none"
+        >
+          {REVIEW_ENGINES.map((eng) => (
+            <option key={eng.id} value={eng.id}>
+              {eng.shortLabel}
+            </option>
+          ))}
+        </select>
+      </div>
+
       {/* Coach Commentary Card */}
       <div className="rounded-xl bg-[#1f1d1a] p-3.5 ring-1 ring-white/[0.08]">
         <div className="flex items-start gap-3">
@@ -215,7 +249,7 @@ export function GameReviewPanel({
         </div>
       )}
 
-      {/* White vs Black Accuracy & Estimated Elo Scorecard */}
+      {/* White vs Black Accuracy & Cross-Platform Estimated Elo Scorecard */}
       <div className="rounded-xl bg-[#1f1d1a] p-3.5 ring-1 ring-white/[0.06]">
         <div className="mb-3 grid grid-cols-[1fr_auto_1fr] items-center gap-2.5 text-center">
           <div className="rounded-xl bg-[#2a2824] p-2.5 ring-1 ring-white/5">
@@ -225,9 +259,7 @@ export function GameReviewPanel({
             <div className="mt-1 text-2xl font-black text-white">
               {review.white.accuracy}%
             </div>
-            <div className="mt-0.5 text-[11px] font-semibold text-[#a3d160]">
-              Elo ~{review.white.estimatedRating}
-            </div>
+            <div className="text-[10px] text-stone-400">Độ chính xác</div>
           </div>
 
           <span className="text-[11px] font-bold tracking-wider text-stone-500 uppercase">
@@ -241,8 +273,50 @@ export function GameReviewPanel({
             <div className="mt-1 text-2xl font-black text-white">
               {review.black.accuracy}%
             </div>
-            <div className="mt-0.5 text-[11px] font-semibold text-[#a3d160]">
-              Elo ~{review.black.estimatedRating}
+            <div className="text-[10px] text-stone-400">Độ chính xác</div>
+          </div>
+        </div>
+
+        {/* 3-System Estimated Elo Rating Comparison: FIDE / Chess.com / Lichess */}
+        <div className="mb-3 rounded-lg bg-[#181715] p-2.5 ring-1 ring-white/[0.05]">
+          <div className="mb-1.5 text-center text-[10px] font-semibold tracking-wider text-stone-400 uppercase">
+            Ước lượng Elo trận đấu (3 hệ thống)
+          </div>
+          <div className="flex flex-col gap-1 text-xs">
+            <div className="grid grid-cols-[1fr_auto_1fr] items-center rounded px-2 py-1 odd:bg-white/[0.025]">
+              <span className="font-mono font-bold text-amber-300">
+                ~{review.white.ratings.fide}
+              </span>
+              <span className="rounded bg-amber-500/15 px-2 py-0.5 text-[10px] font-bold text-amber-300">
+                FIDE
+              </span>
+              <span className="text-right font-mono font-bold text-amber-300">
+                ~{review.black.ratings.fide}
+              </span>
+            </div>
+
+            <div className="grid grid-cols-[1fr_auto_1fr] items-center rounded px-2 py-1 odd:bg-white/[0.025]">
+              <span className="font-mono font-bold text-[#a3d160]">
+                ~{review.white.ratings.chesscom}
+              </span>
+              <span className="rounded bg-[#81b64c]/15 px-2 py-0.5 text-[10px] font-bold text-[#a3d160]">
+                Chess.com
+              </span>
+              <span className="text-right font-mono font-bold text-[#a3d160]">
+                ~{review.black.ratings.chesscom}
+              </span>
+            </div>
+
+            <div className="grid grid-cols-[1fr_auto_1fr] items-center rounded px-2 py-1 odd:bg-white/[0.025]">
+              <span className="font-mono font-bold text-sky-300">
+                ~{review.white.ratings.lichess}
+              </span>
+              <span className="rounded bg-sky-500/15 px-2 py-0.5 text-[10px] font-bold text-sky-300">
+                Lichess
+              </span>
+              <span className="text-right font-mono font-bold text-sky-300">
+                ~{review.black.ratings.lichess}
+              </span>
             </div>
           </div>
         </div>
@@ -299,10 +373,10 @@ export function GameReviewPanel({
 
         <button
           type="button"
-          onClick={onReRunReview}
+          onClick={() => onReRunReview(selectedEngine)}
           className="mt-3 w-full rounded-lg bg-[#2e2c28] py-2 text-xs font-semibold text-stone-200 transition hover:bg-[#3d3a36]"
         >
-          ↻ Phân tích lại toàn ván
+          ↻ Phân tích lại với {review.engineLabel}
         </button>
       </div>
     </div>

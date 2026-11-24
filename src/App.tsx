@@ -26,8 +26,10 @@ import type {
 import {
   CLASSIFICATION_META,
   classifyLiveMove,
+  REVIEW_ENGINES,
   runFullGameReview,
   type GameReviewResult,
+  type ReviewEngineId,
   type ReviewMoveInfo,
 } from './engine/gameReview'
 import {
@@ -310,6 +312,8 @@ export function App() {
 
   // Full Game Review state (Chess.com-style Coach, Scorecard, Badges & Win-Rate Graph)
   const [sidebarTab, setSidebarTab] = useState<SidebarTab>('game')
+  const [reviewEngine, setReviewEngine] =
+    useState<ReviewEngineId>('stockfish-12')
   const [showBestMoveHint, setShowBestMoveHint] = useState<boolean>(false)
   const [reviewResult, setReviewResult] = useState<GameReviewResult | null>(
     null,
@@ -741,14 +745,22 @@ export function App() {
         })
         setSelectedSquare(null)
         setPendingPromotion(null)
-      } else if (e.key === 'Home') {
+      } else if (e.key === 'Home' || e.key === 'ArrowUp') {
         e.preventDefault()
-        setViewIndex(0)
+        setViewIndex((prev) => {
+          if (prev !== 0 && soundEnabled) chessSounds.play('move')
+          return 0
+        })
+        setShowBestMoveHint(false)
         setSelectedSquare(null)
         setPendingPromotion(null)
-      } else if (e.key === 'End') {
+      } else if (e.key === 'End' || e.key === 'ArrowDown') {
         e.preventDefault()
-        setViewIndex(moves.length)
+        setViewIndex((prev) => {
+          if (prev !== moves.length && soundEnabled) chessSounds.play('move')
+          return moves.length
+        })
+        setShowBestMoveHint(false)
         setSelectedSquare(null)
         setPendingPromotion(null)
       }
@@ -773,6 +785,7 @@ export function App() {
   const startGameReview = async (
     targetStartFen = startFen,
     targetMoves = moves,
+    engineId: ReviewEngineId = reviewEngine,
   ) => {
     if (targetMoves.length === 0) return
 
@@ -787,7 +800,7 @@ export function App() {
 
     try {
       const result = await runFullGameReview(targetStartFen, targetMoves, {
-        depth: 12,
+        engineId,
         signal: controller.signal,
         onProgress: (completed, total) => {
           setReviewProgress({ completed, total })
@@ -1233,7 +1246,10 @@ export function App() {
               Phím{' '}
               <kbd className="rounded bg-white/5 px-1 text-stone-400">←</kbd>{' '}
               <kbd className="rounded bg-white/5 px-1 text-stone-400">→</kbd>{' '}
-              tua nước đi
+              từng nước •{' '}
+              <kbd className="rounded bg-white/5 px-1 text-stone-400">↑</kbd>{' '}
+              <kbd className="rounded bg-white/5 px-1 text-stone-400">↓</kbd>{' '}
+              đầu/cuối ván
             </span>
           </div>
         </section>
@@ -1598,6 +1614,7 @@ export function App() {
             ) : reviewResult ? (
               <GameReviewPanel
                 review={reviewResult}
+                selectedEngine={reviewEngine}
                 whiteName={players.white}
                 blackName={players.black}
                 currentPly={viewIndex}
@@ -1608,25 +1625,58 @@ export function App() {
                 }
                 onSelectPly={jumpToPly}
                 onPlayBestMove={(uci, atPly) => playUciMoveIfValid(uci, atPly)}
-                onReRunReview={() => void startGameReview()}
+                onChangeReviewEngine={(nextEngine) =>
+                  setReviewEngine(nextEngine)
+                }
+                onReRunReview={(nextEngine) =>
+                  void startGameReview(
+                    startFen,
+                    moves,
+                    nextEngine ?? reviewEngine,
+                  )
+                }
               />
             ) : (
-              <div className="flex flex-1 flex-col items-center justify-center gap-3.5 px-6 py-10 text-center">
+              <div className="flex flex-1 flex-col items-center justify-center gap-3.5 px-6 py-8 text-center">
                 <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-[#81b64c]/15 text-3xl ring-1 ring-[#81b64c]/30">
                   🎓
                 </div>
                 <div>
                   <h3 className="text-sm font-bold text-white">
-                    Game Review kiểu Chess.com
+                    Đánh giá ván đấu (Đa Engine)
                   </h3>
                   <p className="mt-1.5 text-xs leading-relaxed text-stone-400">
-                    Chấm điểm Accuracy %, Elo ước tính, gắn huy hiệu{' '}
-                    <span className="font-bold text-[#1baca6]">!!</span>{' '}
-                    <span className="font-bold text-[#81b64c]">★</span>{' '}
-                    <span className="font-bold text-[#e6912c]">?</span>{' '}
-                    <span className="font-bold text-[#ca3431]">??</span> trực tiếp
-                    trên bàn cờ và HLV nhận xét từng nước đi.
+                    Chấm điểm Accuracy %, ước lượng Elo{' '}
+                    <strong className="text-amber-300">FIDE</strong> /{' '}
+                    <strong className="text-[#a3d160]">Chess.com</strong> /{' '}
+                    <strong className="text-sky-300">Lichess</strong>, gắn huy
+                    hiệu trực tiếp trên bàn cờ và HLV nhận xét từng nước đi.
                   </p>
+                </div>
+
+                {/* Review Engine Selector before starting */}
+                <div className="w-full max-w-[300px] rounded-xl bg-[#1f1d1a] p-2.5 text-left ring-1 ring-white/[0.06]">
+                  <div className="mb-1.5 text-[10px] font-semibold tracking-wider text-stone-400 uppercase">
+                    Chọn Engine chấm điểm
+                  </div>
+                  <div className="grid grid-cols-2 gap-1.5">
+                    {REVIEW_ENGINES.map((eng) => (
+                      <button
+                        key={eng.id}
+                        type="button"
+                        onClick={() => setReviewEngine(eng.id)}
+                        title={eng.desc}
+                        className={[
+                          'rounded-lg px-2 py-1.5 text-left text-[11px] font-semibold transition',
+                          reviewEngine === eng.id
+                            ? 'bg-[#34312d] text-[#b4e07c] ring-1 ring-[#81b64c]/60'
+                            : 'bg-[#262421] text-stone-300 hover:bg-[#2f2d29]',
+                        ].join(' ')}
+                      >
+                        {eng.shortLabel}
+                      </button>
+                    ))}
+                  </div>
                 </div>
 
                 {moves.length > 0 ? (
@@ -2014,7 +2064,7 @@ export function App() {
               type="button"
               onClick={() => jumpToPly(0)}
               disabled={viewIndex === 0}
-              title="Về đầu ván (Home)"
+              title="Về đầu ván (↑ hoặc Home)"
               aria-label="Về đầu ván"
               className="rounded-lg bg-[#2d2b27] py-2 text-sm font-bold text-stone-200 transition hover:bg-[#3d3a36] disabled:opacity-35"
             >
@@ -2044,7 +2094,7 @@ export function App() {
               type="button"
               onClick={() => jumpToPly(moves.length)}
               disabled={viewIndex >= moves.length}
-              title="Về nước cuối (End)"
+              title="Về nước cuối (↓ hoặc End)"
               aria-label="Về nước cuối"
               className="rounded-lg bg-[#2d2b27] py-2 text-sm font-bold text-stone-200 transition hover:bg-[#3d3a36] disabled:opacity-35"
             >

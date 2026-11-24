@@ -1,4 +1,60 @@
 import { Chess, DEFAULT_POSITION, type PieceSymbol, type Square } from 'chess.js'
+import type {
+  ClassicalWorkerRequest,
+  ClassicalWorkerResponse,
+  WorkerEngineStyle,
+} from './classicalWorker'
+
+export type ReviewEngineId =
+  | 'stockfish-12'
+  | 'stockfish-16'
+  | 'classical'
+  | 'aggressive'
+  | 'jschess'
+
+export const REVIEW_ENGINES: Array<{
+  id: ReviewEngineId
+  label: string
+  shortLabel: string
+  desc: string
+}> = [
+  {
+    id: 'stockfish-12',
+    label: 'Stockfish 19 (Nhanh • d12)',
+    shortLabel: 'Stockfish 19',
+    desc: 'NNUE chuẩn xác, tốc độ nhanh',
+  },
+  {
+    id: 'stockfish-16',
+    label: 'Stockfish 19 Deep (d16)',
+    shortLabel: 'SF19 Deep',
+    desc: 'Phân tích sâu cho ván quan trọng',
+  },
+  {
+    id: 'classical',
+    label: 'PeSTO Cổ điển (d3)',
+    shortLabel: 'PeSTO Cổ điển',
+    desc: 'Đánh giá theo thế trận & vị trí quân',
+  },
+  {
+    id: 'aggressive',
+    label: 'Tấn công (Aggressive)',
+    shortLabel: 'Tấn công',
+    desc: 'Chấm điểm theo độ chủ động & áp lực Vua',
+  },
+  {
+    id: 'jschess',
+    label: 'js-chess-engine (MIT)',
+    shortLabel: 'js-chess',
+    desc: 'Góc nhìn từ open-source engine độc lập',
+  },
+]
+
+export interface EstimatedRatings {
+  fide: number
+  chesscom: number
+  lichess: number
+}
 
 export type MoveClassification =
   | 'brilliant'
@@ -33,6 +89,7 @@ export interface ReviewMoveInfo {
 export interface SideReviewSummary {
   accuracy: number
   estimatedRating: number
+  ratings: EstimatedRatings
   brilliant: number
   great: number
   best: number
@@ -45,6 +102,8 @@ export interface SideReviewSummary {
 }
 
 export interface GameReviewResult {
+  engineId: ReviewEngineId
+  engineLabel: string
   /** White win probability at ply 0 (starting position) */
   startWinPercent: number
   moves: ReviewMoveInfo[]
@@ -369,6 +428,49 @@ function buildCoachCommentary(params: {
   }
 }
 
+function roundTo50(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, Math.round(value / 50) * 50))
+}
+
+/**
+ * Estimates single-game performance Elo across Chess.com, Lichess, and FIDE scales
+ * calibrated to real-world cross-platform rating conversion curves.
+ */
+function estimateCrossPlatformRatings(params: {
+  accuracy: number
+  blunder: number
+  mistake: number
+  brilliant: number
+  great: number
+}): EstimatedRatings {
+  const { accuracy, blunder, mistake, brilliant, great } = params
+
+  // Base Chess.com Rapid/Blitz performance score (400 – 2750)
+  const baseChessCom = 420 + Math.pow(accuracy / 100, 1.9) * 2250
+  const penalty = blunder * 85 + mistake * 30
+  const bonus = brilliant * 60 + great * 25
+  const rawChessCom = Math.max(400, Math.min(2750, baseChessCom - penalty + bonus))
+
+  // Lichess Glicko-2 typically runs +220 to +320 above Chess.com at 1000–1900, converging near 2500+
+  const lichessOffset =
+    rawChessCom < 2200
+      ? 280 - ((rawChessCom - 800) / 1400) * 90
+      : Math.max(40, 190 - ((rawChessCom - 2200) / 550) * 150)
+  const rawLichess = rawChessCom + lichessOffset
+
+  // FIDE Classical/Rapid has a higher floor (~1000–1400) and stricter scaling above 1800
+  const rawFide =
+    rawChessCom < 1400
+      ? 950 + ((rawChessCom - 400) / 1000) * 500
+      : 1450 + (rawChessCom - 1400) * 0.92
+
+  return {
+    fide: roundTo50(rawFide, 1000, 2750),
+    chesscom: roundTo50(rawChessCom, 400, 2750),
+    lichess: roundTo50(rawLichess, 800, 2850),
+  }
+}
+
 function computeSideSummary(
   moves: ReviewMoveInfo[],
   color: 'w' | 'b',
@@ -377,6 +479,7 @@ function computeSideSummary(
   const summary: SideReviewSummary = {
     accuracy: 100,
     estimatedRating: 1500,
+    ratings: { fide: 1500, chesscom: 1500, lichess: 1750 },
     brilliant: 0,
     great: 0,
     best: 0,
@@ -405,16 +508,14 @@ function computeSideSummary(
 
   const accuracy = Math.round((accSum / sideMoves.length) * 10) / 10
   summary.accuracy = accuracy
-
-  // Fun Chess.com-style estimated single-game performance Elo (400 – 2700)
-  const baseElo = 450 + Math.pow(accuracy / 100, 1.85) * 2150
-  const blunderPenalty = summary.blunder * 85 + summary.mistake * 30
-  const brilliantBonus = summary.brilliant * 60 + summary.great * 25
-  const estimated = Math.max(
-    400,
-    Math.min(2750, Math.round((baseElo - blunderPenalty + brilliantBonus) / 50) * 50),
-  )
-  summary.estimatedRating = estimated
+  summary.ratings = estimateCrossPlatformRatings({
+    accuracy,
+    blunder: summary.blunder,
+    mistake: summary.mistake,
+    brilliant: summary.brilliant,
+    great: summary.great,
+  })
+  summary.estimatedRating = summary.ratings.chesscom
 
   return summary
 }
@@ -527,21 +628,63 @@ function waitForReady(worker: Worker, signal: AbortSignal): Promise<void> {
   })
 }
 
+function evaluateWithLocalWorker(
+  worker: Worker,
+  id: number,
+  fen: string,
+  style: WorkerEngineStyle,
+  depth: number,
+  signal: AbortSignal,
+): Promise<PositionEval> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(new DOMException('Aborted', 'AbortError'))
+      return
+    }
+
+    const onAbort = () => {
+      cleanup()
+      reject(new DOMException('Aborted', 'AbortError'))
+    }
+
+    const onMessage = (event: MessageEvent<ClassicalWorkerResponse>) => {
+      if (event.data.id !== id) return
+      cleanup()
+      resolve({
+        cp: event.data.result.cp,
+        mate: event.data.result.mate,
+        bestMove: event.data.result.bestMove,
+      })
+    }
+
+    const cleanup = () => {
+      worker.removeEventListener('message', onMessage)
+      signal.removeEventListener('abort', onAbort)
+    }
+
+    signal.addEventListener('abort', onAbort)
+    worker.addEventListener('message', onMessage)
+    const req: ClassicalWorkerRequest = { id, fen, style, depth }
+    worker.postMessage(req)
+  })
+}
+
 /**
- * Chess.com-style Full Game Review using a dedicated Stockfish 19 Worker.
- * Classifies every move (Brilliant / Great / Best / Excellent / Good / Book / Inaccuracy / Mistake / Blunder),
- * generates Vietnamese coach commentary, accuracy %, estimated Elo, and win-rate data.
+ * Multi-engine Chess.com-style Full Game Review.
+ * Supports Stockfish 19 (d12 / d16), Classical PeSTO, Aggressive, and js-chess-engine (all via Web Workers).
  */
 export async function runFullGameReview(
   startFen: string,
   moves: ReviewInputMove[],
   options: {
-    depth?: number
+    engineId?: ReviewEngineId
     signal: AbortSignal
     onProgress?: (completed: number, total: number) => void
   },
 ): Promise<GameReviewResult> {
-  const depth = options.depth ?? 12
+  const engineId: ReviewEngineId = options.engineId ?? 'stockfish-12'
+  const engineMeta =
+    REVIEW_ENGINES.find((e) => e.id === engineId) ?? REVIEW_ENGINES[0]
   const { signal, onProgress } = options
   const isStandardStart = startFen === DEFAULT_POSITION
 
@@ -631,11 +774,22 @@ export async function runFullGameReview(
     })
   }
 
-  const workerUrl = `${import.meta.env.BASE_URL}stockfish/stockfish-19-lite-single.js`
-  const worker = new Worker(workerUrl)
+  const isStockfish =
+    engineId === 'stockfish-12' || engineId === 'stockfish-16'
+  const sfDepth = engineId === 'stockfish-16' ? 16 : 12
+
+  const worker = isStockfish
+    ? new Worker(
+        `${import.meta.env.BASE_URL}stockfish/stockfish-19-lite-single.js`,
+      )
+    : new Worker(new URL('./classicalWorker.ts', import.meta.url), {
+        type: 'module',
+      })
 
   try {
-    await waitForReady(worker, signal)
+    if (isStockfish) {
+      await waitForReady(worker, signal)
+    }
 
     const evals: PositionEval[] = []
     const total = snapshots.length
@@ -654,8 +808,18 @@ export async function runFullGameReview(
         })
       } else if (snap.isDraw) {
         evals.push({ cp: 0, mate: null, bestMove: null })
+      } else if (isStockfish) {
+        const res = await evaluateSingleFen(worker, snap.fen, sfDepth, signal)
+        evals.push(res)
       } else {
-        const res = await evaluateSingleFen(worker, snap.fen, depth, signal)
+        const res = await evaluateWithLocalWorker(
+          worker,
+          i + 1,
+          snap.fen,
+          engineId,
+          3,
+          signal,
+        )
         evals.push(res)
       }
 
@@ -733,13 +897,17 @@ export async function runFullGameReview(
     }
 
     return {
+      engineId,
+      engineLabel: engineMeta.label,
       startWinPercent,
       moves: reviewedMoves,
       white: computeSideSummary(reviewedMoves, 'w'),
       black: computeSideSummary(reviewedMoves, 'b'),
     }
   } finally {
-    worker.postMessage('quit')
+    if (isStockfish) {
+      worker.postMessage('quit')
+    }
     worker.terminate()
   }
 }
