@@ -1,13 +1,24 @@
-import { Chess, DEFAULT_POSITION, type PieceSymbol, type Square } from 'chess.js'
-import { useEffect, useRef, useState } from 'react'
+import {
+  Chess,
+  DEFAULT_POSITION,
+  type Move,
+  type PieceSymbol,
+  type Square,
+} from 'chess.js'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   ChessBoard,
+  type BoardArrow,
   type LastMove,
   type PendingPromotion,
 } from './components/ChessBoard'
 import { EvaluationBar } from './components/EvaluationBar'
 import { ImportModal, type ImportTab } from './components/ImportModal'
 import { PlayerBar } from './components/PlayerBar'
+import {
+  analyzeWithLocalEngine,
+  type LocalEngineResult,
+} from './engine/classicalEngine'
 import {
   formatEvaluationScore,
   INITIAL_EVALUATION,
@@ -19,6 +30,9 @@ import {
   getMaterialSummary,
   type BoardThemeId,
 } from './utils/boardThemes'
+import { chessSounds } from './utils/chessSounds'
+
+type EngineMode = 'stockfish' | 'classical' | 'aggressive' | 'compare'
 
 interface StoredMove {
   from: Square
@@ -38,6 +52,29 @@ const DEFAULT_PLAYERS: PlayerNames = {
 }
 
 const ENGINE_DEPTH = 15
+
+const ENGINE_MODES: Array<{ id: EngineMode; label: string; desc: string }> = [
+  {
+    id: 'stockfish',
+    label: 'Stockfish 19',
+    desc: 'NNUE sâu • Top 2 biến',
+  },
+  {
+    id: 'classical',
+    label: 'PeSTO Cổ điển',
+    desc: 'Vị trí & cấu trúc quân',
+  },
+  {
+    id: 'aggressive',
+    label: 'Tấn công',
+    desc: 'Ưu tiên áp lực & chủ động',
+  },
+  {
+    id: 'compare',
+    label: 'So sánh 2 Engine',
+    desc: 'Stockfish vs PeSTO',
+  },
+]
 
 function buildGameAtPly(
   startFen: string,
@@ -119,21 +156,53 @@ function parseUciMove(
   return { from, to, promotion: promo }
 }
 
-function uciToSan(fen: string, uci: string | null): string | null {
-  const parsed = parseUciMove(uci)
-  if (!parsed) return null
+function uciLineToSan(fen: string, pv: string[], maxMoves = 4): string {
+  const temp = new Chess()
   try {
-    const temp = new Chess()
     temp.load(fen)
-    const move = temp.move({
-      from: parsed.from,
-      to: parsed.to,
-      promotion: parsed.promotion,
-    })
-    return move.san
   } catch {
-    return uci
+    return pv.slice(0, maxMoves).join(' ')
   }
+  const sans: string[] = []
+  for (const uci of pv.slice(0, maxMoves)) {
+    const parsed = parseUciMove(uci)
+    if (!parsed) break
+    try {
+      const m = temp.move({
+        from: parsed.from,
+        to: parsed.to,
+        promotion: parsed.promotion,
+      })
+      sans.push(m.san)
+    } catch {
+      break
+    }
+  }
+  return sans.join(' ')
+}
+
+function playSoundForMove(executed: Move, nextGame: Chess): void {
+  if (nextGame.isGameOver()) {
+    chessSounds.play('gameOver')
+    return
+  }
+  if (nextGame.inCheck()) {
+    chessSounds.play('check')
+    return
+  }
+  if (executed.promotion) {
+    chessSounds.play('promote')
+    return
+  }
+  if (executed.san === 'O-O' || executed.san === 'O-O-O') {
+    chessSounds.play('castle')
+    return
+  }
+  if (executed.captured) {
+    chessSounds.play('capture')
+    return
+  }
+  chessSounds.play('move')
 }
 
 export function App() {
@@ -146,21 +215,26 @@ export function App() {
   const [selectedSquare, setSelectedSquare] = useState<Square | null>(null)
   const [orientation, setOrientation] = useState<'w' | 'b'>('w')
   const [themeId, setThemeId] = useState<BoardThemeId>('chesscom')
+  const [soundEnabled, setSoundEnabled] = useState<boolean>(true)
   const [pendingPromotion, setPendingPromotion] =
     useState<PendingPromotion | null>(null)
   const [importModalTab, setImportModalTab] = useState<ImportTab | null>(null)
   const [copiedType, setCopiedType] = useState<'fen' | 'pgn' | null>(null)
 
-  // Stockfish Engine state
+  // Multi-Engine state
   const [engineEnabled, setEngineEnabled] = useState<boolean>(true)
+  const [engineMode, setEngineMode] = useState<EngineMode>('stockfish')
   const [showBestMoveArrow, setShowBestMoveArrow] = useState<boolean>(true)
-  const [evaluation, setEvaluation] =
+  const [sfEvaluation, setSfEvaluation] =
     useState<EngineEvaluation>(INITIAL_EVALUATION)
   const engineRef = useRef<StockfishService | null>(null)
 
   const activeMoveRef = useRef<HTMLButtonElement>(null)
 
-  const displayGame = buildGameAtPly(startFen, moves, viewIndex)
+  const displayGame = useMemo(
+    () => buildGameAtPly(startFen, moves, viewIndex),
+    [startFen, moves, viewIndex],
+  )
   const fen = displayGame.fen()
   const isCheckmate = displayGame.isCheckmate()
   const isGameOver = displayGame.isGameOver()
@@ -179,12 +253,17 @@ export function App() {
         }
       : null
 
+  const needsStockfish =
+    engineEnabled &&
+    !isGameOver &&
+    (engineMode === 'stockfish' || engineMode === 'compare')
+
   // Lifecycle: start Stockfish Worker once
   useEffect(() => {
     const service = new StockfishService()
     engineRef.current = service
     service.start((nextEval) => {
-      setEvaluation(nextEval)
+      setSfEvaluation(nextEval)
     })
 
     return () => {
@@ -193,55 +272,113 @@ export function App() {
     }
   }, [])
 
-  // Trigger Stockfish analysis whenever FEN or engineEnabled changes
+  // Trigger Stockfish analysis when needed
   useEffect(() => {
     const service = engineRef.current
     if (!service) return
 
-    if (!engineEnabled) {
+    if (!needsStockfish) {
       service.stop()
       return
     }
 
-    if (isGameOver) {
-      service.stop()
-      return
+    const multiPv = engineMode === 'stockfish' ? 2 : 1
+    service.analyze(fen, ENGINE_DEPTH, multiPv)
+  }, [fen, needsStockfish, engineMode])
+
+  // Local Classical PeSTO / Aggressive Engine analysis (fast depth-3 alpha-beta)
+  const localEngineResult: LocalEngineResult | null = useMemo(() => {
+    if (!engineEnabled || isGameOver) return null
+    if (engineMode === 'classical' || engineMode === 'compare') {
+      return analyzeWithLocalEngine(fen, 'classical', 3)
     }
+    if (engineMode === 'aggressive') {
+      return analyzeWithLocalEngine(fen, 'aggressive', 3)
+    }
+    return null
+  }, [fen, engineEnabled, engineMode, isGameOver])
 
-    service.analyze(fen, ENGINE_DEPTH)
-  }, [fen, engineEnabled, isGameOver])
-
-  // Override evaluation cleanly for terminal positions (Checkmate / Draw)
-  const effectiveEvaluation: EngineEvaluation = isGameOver
-    ? {
-        ...evaluation,
-        cp: isCheckmate ? null : 0,
-        mate: isCheckmate ? (turn === 'w' ? -0 : 0) : null,
+  // Choose primary evaluation for EvaluationBar based on active engine mode
+  const activeEvalForBar: EngineEvaluation = (() => {
+    if (isCheckmate) {
+      return {
+        ...sfEvaluation,
+        cp: null,
+        mate: turn === 'w' ? -1 : 1,
         bestMove: null,
         isSearching: false,
       }
-    : evaluation
+    }
+    if (isGameOver) {
+      return {
+        ...sfEvaluation,
+        cp: 0,
+        mate: null,
+        bestMove: null,
+        isSearching: false,
+      }
+    }
+    if (
+      (engineMode === 'classical' || engineMode === 'aggressive') &&
+      localEngineResult
+    ) {
+      return {
+        ...INITIAL_EVALUATION,
+        cp: localEngineResult.cp,
+        mate: localEngineResult.mate,
+        depth: localEngineResult.depth,
+        targetDepth: localEngineResult.depth,
+        bestMove: localEngineResult.bestMove,
+        pv: localEngineResult.pv,
+        isSearching: false,
+        isReady: true,
+      }
+    }
+    return sfEvaluation
+  })()
 
-  // Preserve sign of checkmate winner for EvaluationBar (White won => +1, Black won => -1)
-  const barEvaluation: EngineEvaluation =
-    isCheckmate
-      ? {
-          ...effectiveEvaluation,
-          mate: turn === 'w' ? -1 : 1,
-          cp: null,
+  // Build engine suggestion arrows (supports 2 distinct colored arrows in Compare mode!)
+  const engineArrows: BoardArrow[] = (() => {
+    if (!engineEnabled || !showBestMoveArrow || isGameOver) return []
+    const arrows: BoardArrow[] = []
+
+    if (engineMode === 'stockfish' || engineMode === 'compare') {
+      const sfBest = parseUciMove(sfEvaluation.bestMove)
+      if (sfBest) {
+        arrows.push({
+          from: sfBest.from,
+          to: sfBest.to,
+          color: '#16a34a', // Green for Stockfish 19
+          opacity: 0.8,
+        })
+      }
+    }
+
+    if (
+      (engineMode === 'classical' ||
+        engineMode === 'aggressive' ||
+        engineMode === 'compare') &&
+      localEngineResult?.bestMove
+    ) {
+      const localBest = parseUciMove(localEngineResult.bestMove)
+      if (localBest) {
+        const sameAsSf =
+          arrows.length > 0 &&
+          arrows[0].from === localBest.from &&
+          arrows[0].to === localBest.to
+        if (!sameAsSf) {
+          arrows.push({
+            from: localBest.from,
+            to: localBest.to,
+            color: engineMode === 'aggressive' ? '#f97316' : '#3b82f6', // Blue for PeSTO, Orange for Aggressive
+            opacity: 0.78,
+          })
         }
-      : effectiveEvaluation
+      }
+    }
 
-  const parsedBestMove =
-    engineEnabled && !isGameOver ? parseUciMove(effectiveEvaluation.bestMove) : null
-  const bestMoveArrow: LastMove | null =
-    showBestMoveArrow && parsedBestMove
-      ? { from: parsedBestMove.from, to: parsedBestMove.to }
-      : null
-  const bestMoveSan =
-    engineEnabled && !isGameOver
-      ? uciToSan(fen, effectiveEvaluation.bestMove)
-      : null
+    return arrows
+  })()
 
   // Build move rows supporting custom starting FEN (including Black to move first)
   const { startNumber, startsWithBlack } = getInitialMoveInfo(startFen)
@@ -297,12 +434,20 @@ export function App() {
 
       if (e.key === 'ArrowLeft') {
         e.preventDefault()
-        setViewIndex((prev) => Math.max(0, prev - 1))
+        setViewIndex((prev) => {
+          const next = Math.max(0, prev - 1)
+          if (next !== prev && soundEnabled) chessSounds.play('move')
+          return next
+        })
         setSelectedSquare(null)
         setPendingPromotion(null)
       } else if (e.key === 'ArrowRight') {
         e.preventDefault()
-        setViewIndex((prev) => Math.min(moves.length, prev + 1))
+        setViewIndex((prev) => {
+          const next = Math.min(moves.length, prev + 1)
+          if (next !== prev && soundEnabled) chessSounds.play('move')
+          return next
+        })
         setSelectedSquare(null)
         setPendingPromotion(null)
       } else if (e.key === 'Home') {
@@ -320,7 +465,7 @@ export function App() {
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [importModalTab, moves.length])
+  }, [importModalTab, moves.length, soundEnabled])
 
   const legalMovesForSelected = selectedSquare
     ? displayGame.moves({ square: selectedSquare, verbose: true })
@@ -340,6 +485,11 @@ export function App() {
         promotion: executed.promotion,
       },
     ]
+
+    if (soundEnabled) {
+      playSoundForMove(executed, nextGame)
+    }
+
     setMoves(updatedMoves)
     setViewIndex(updatedMoves.length)
     setSelectedSquare(null)
@@ -395,6 +545,7 @@ export function App() {
     setViewIndex(nextMoves.length)
     setPendingPromotion(null)
     setSelectedSquare(null)
+    if (soundEnabled) chessSounds.play('move')
   }
 
   const handleReset = () => {
@@ -455,7 +606,11 @@ export function App() {
   }
 
   const jumpToPly = (ply: number) => {
-    setViewIndex(Math.max(0, Math.min(moves.length, ply)))
+    const clamped = Math.max(0, Math.min(moves.length, ply))
+    if (clamped !== viewIndex && soundEnabled) {
+      chessSounds.play('move')
+    }
+    setViewIndex(clamped)
     setSelectedSquare(null)
     setPendingPromotion(null)
   }
@@ -472,6 +627,12 @@ export function App() {
     } catch {
       // Ignore clipboard errors in restricted environments
     }
+  }
+
+  const playUciMoveIfValid = (uci: string | null) => {
+    const parsed = parseUciMove(uci)
+    if (!parsed || isGameOver) return
+    commitMove(parsed.from, parsed.to, parsed.promotion)
   }
 
   const topColor: 'w' | 'b' = orientation === 'w' ? 'b' : 'w'
@@ -492,12 +653,27 @@ export function App() {
                 JustChess
               </h1>
               <p className="text-[11px] text-stone-400">
-                {gameMeta ?? 'Bàn cờ chuẩn thi đấu • Stockfish 19'}
+                {gameMeta ?? 'Bàn cờ chuẩn thi đấu • Đa Engine'}
               </p>
             </div>
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
+            {/* Sound toggle */}
+            <button
+              type="button"
+              onClick={() => setSoundEnabled((prev) => !prev)}
+              title={soundEnabled ? 'Tắt âm thanh' : 'Bật âm thanh'}
+              className={[
+                'rounded-lg px-2.5 py-1.5 text-xs font-semibold ring-1 transition',
+                soundEnabled
+                  ? 'bg-[#302e2b] text-stone-100 ring-white/10 hover:bg-[#3d3a36]'
+                  : 'bg-[#161512] text-stone-500 ring-white/5 hover:text-stone-300',
+              ].join(' ')}
+            >
+              {soundEnabled ? '🔊 Âm thanh' : '🔇 Tắt tiếng'}
+            </button>
+
             {/* Import FEN / PGN trigger */}
             <button
               type="button"
@@ -541,7 +717,7 @@ export function App() {
       </header>
 
       {/* Main Arena */}
-      <main className="mx-auto grid max-w-6xl items-start gap-6 px-4 py-6 lg:grid-cols-[minmax(0,636px)_340px] lg:justify-center">
+      <main className="mx-auto grid max-w-6xl items-start gap-6 px-4 py-6 lg:grid-cols-[minmax(0,636px)_360px] lg:justify-center">
         {/* Left column: Evaluation Bar + Player Bars + Chessboard */}
         <section className="flex flex-col items-center gap-2.5">
           {/* Top PlayerBar aligned with chessboard */}
@@ -570,20 +746,21 @@ export function App() {
           {/* Evaluation Bar + Chessboard row */}
           <div className="flex w-full max-w-[636px] items-stretch gap-2.5">
             <EvaluationBar
-              evaluation={barEvaluation}
+              evaluation={activeEvalForBar}
               orientation={orientation}
               enabled={engineEnabled}
             />
             <div className="min-w-0 flex-1">
               <ChessBoard
                 board={board}
+                fenKey={fen}
                 turn={turn}
                 orientation={orientation}
                 theme={theme}
                 selectedSquare={selectedSquare}
                 legalTargets={legalTargets}
                 lastMove={lastMove}
-                bestMoveArrow={bestMoveArrow}
+                engineArrows={engineArrows}
                 checkedKingSquare={checkedKingSquare}
                 pendingPromotion={pendingPromotion}
                 onSquareSelect={handleSquareSelect}
@@ -616,10 +793,18 @@ export function App() {
               />
             </div>
           </div>
+
+          {/* Subtle board annotation hint */}
+          <p className="w-full max-w-[636px] pl-8 text-[11px] text-stone-500 sm:pl-9">
+            Chuột phải: nhấp để đánh dấu ô • kéo để vẽ mũi tên (giữ{' '}
+            <span className="text-stone-400">Shift</span> xanh lá,{' '}
+            <span className="text-stone-400">Alt</span> xanh dương,{' '}
+            <span className="text-stone-400">Ctrl</span> vàng)
+          </p>
         </section>
 
         {/* Right column: Lichess / Chess.com Sidebar */}
-        <aside className="flex w-full flex-col overflow-hidden rounded-xl bg-[#262421] shadow-xl ring-1 ring-white/5 lg:h-[696px]">
+        <aside className="flex w-full flex-col overflow-hidden rounded-xl bg-[#262421] shadow-xl ring-1 ring-white/5 lg:h-[716px]">
           {/* Status Header */}
           <div
             className={[
@@ -639,7 +824,7 @@ export function App() {
             )}
           </div>
 
-          {/* Stockfish 19 UCI Engine Panel */}
+          {/* Multi-Engine Analysis Panel */}
           <div className="border-b border-white/5 bg-[#1e1c1a] px-3.5 py-2.5">
             <div className="flex items-center justify-between gap-2">
               <div className="flex items-center gap-2">
@@ -648,21 +833,16 @@ export function App() {
                     'h-2 w-2 rounded-full',
                     !engineEnabled
                       ? 'bg-stone-600'
-                      : effectiveEvaluation.error
+                      : sfEvaluation.error && needsStockfish
                         ? 'bg-red-500'
-                        : effectiveEvaluation.isSearching
+                        : sfEvaluation.isSearching && needsStockfish
                           ? 'animate-pulse bg-amber-400'
                           : 'bg-[#81b64c]',
                   ].join(' ')}
                 />
                 <span className="text-xs font-semibold text-stone-200">
-                  Stockfish 19
+                  Phân tích Engine
                 </span>
-                {engineEnabled && !effectiveEvaluation.error && (
-                  <span className="font-mono text-[11px] text-stone-400">
-                    d{effectiveEvaluation.depth}/{ENGINE_DEPTH}
-                  </span>
-                )}
               </div>
 
               <div className="flex items-center gap-1.5">
@@ -670,7 +850,7 @@ export function App() {
                   <button
                     type="button"
                     onClick={() => setShowBestMoveArrow((prev) => !prev)}
-                    title="Bật/tắt mũi tên nước đi tối ưu"
+                    title="Bật/tắt mũi tên gợi ý từ Engine"
                     className={[
                       'rounded px-2 py-0.5 text-[11px] font-medium transition',
                       showBestMoveArrow
@@ -697,47 +877,186 @@ export function App() {
             </div>
 
             {engineEnabled && (
-              <div className="mt-2 flex items-center justify-between gap-2 text-xs">
-                {effectiveEvaluation.error ? (
-                  <span className="text-red-400">
-                    {effectiveEvaluation.error}
-                  </span>
-                ) : (
-                  <>
-                    <div className="flex items-center gap-2">
-                      <span className="rounded bg-[#2c2a27] px-2 py-0.5 font-mono text-xs font-bold text-white ring-1 ring-white/10">
-                        {isCheckmate
-                          ? '#'
-                          : formatEvaluationScore(effectiveEvaluation)}
-                      </span>
-                      <span className="text-[11px] text-stone-400">
-                        {!effectiveEvaluation.isReady
-                          ? 'Đang tải WASM...'
-                          : effectiveEvaluation.isSearching
-                            ? 'Đang phân tích...'
-                            : 'Hoàn tất'}
-                      </span>
-                    </div>
+              <>
+                {/* Engine Mode Selector */}
+                <div className="mt-2 grid grid-cols-2 gap-1 rounded-lg bg-[#161512] p-1 ring-1 ring-white/5">
+                  {ENGINE_MODES.map((m) => (
+                    <button
+                      key={m.id}
+                      type="button"
+                      onClick={() => setEngineMode(m.id)}
+                      title={m.desc}
+                      className={[
+                        'rounded-md px-2 py-1 text-[11px] font-medium transition',
+                        engineMode === m.id
+                          ? 'bg-[#302e2b] text-white shadow-sm'
+                          : 'text-stone-400 hover:text-stone-200',
+                      ].join(' ')}
+                    >
+                      {m.label}
+                    </button>
+                  ))}
+                </div>
 
-                    {bestMoveSan && parsedBestMove && (
-                      <button
-                        type="button"
-                        onClick={() =>
-                          commitMove(
-                            parsedBestMove.from,
-                            parsedBestMove.to,
-                            parsedBestMove.promotion,
-                          )
-                        }
-                        title={`Đi nước tối ưu (${effectiveEvaluation.bestMove})`}
-                        className="rounded bg-[#302e2b] px-2 py-0.5 font-mono text-[11px] font-semibold text-[#a3d160] transition hover:bg-[#3d3a36]"
-                      >
-                        Best: {bestMoveSan}
-                      </button>
-                    )}
-                  </>
-                )}
-              </div>
+                {/* Engine Output Area */}
+                <div className="mt-2 flex flex-col gap-1.5 text-xs">
+                  {sfEvaluation.error && needsStockfish ? (
+                    <span className="text-red-400">{sfEvaluation.error}</span>
+                  ) : isGameOver ? (
+                    <span className="text-[11px] text-stone-400">
+                      Ván đấu đã kết thúc.
+                    </span>
+                  ) : (
+                    <>
+                      {/* Stockfish 19 MultiPV lines */}
+                      {engineMode === 'stockfish' && (
+                        <div className="flex flex-col gap-1">
+                          {sfEvaluation.lines.length === 0 ? (
+                            <span className="text-[11px] text-stone-400">
+                              {sfEvaluation.isReady
+                                ? 'Stockfish 19 đang tính toán...'
+                                : 'Đang tải Stockfish WASM...'}
+                            </span>
+                          ) : (
+                            sfEvaluation.lines.map((line) => (
+                              <button
+                                key={line.multipv}
+                                type="button"
+                                onClick={() =>
+                                  playUciMoveIfValid(line.pv[0] ?? null)
+                                }
+                                title="Nhấp để đi nước đầu tiên của nhánh này"
+                                className="flex items-center gap-2 rounded bg-[#262421] px-2 py-1 text-left transition hover:bg-[#302e2b]"
+                              >
+                                <span className="w-11 shrink-0 rounded bg-[#161512] py-0.5 text-center font-mono text-[11px] font-bold text-[#a3d160]">
+                                  {formatEvaluationScore(line)}
+                                </span>
+                                <span className="truncate font-mono text-[11px] text-stone-200">
+                                  {uciLineToSan(fen, line.pv, 5)}
+                                </span>
+                                <span className="ml-auto shrink-0 font-mono text-[10px] text-stone-500">
+                                  d{line.depth}
+                                </span>
+                              </button>
+                            ))
+                          )}
+                        </div>
+                      )}
+
+                      {/* Classical PeSTO or Aggressive single engine output */}
+                      {(engineMode === 'classical' ||
+                        engineMode === 'aggressive') &&
+                        localEngineResult && (
+                          <div className="flex flex-col gap-1.5 rounded bg-[#262421] p-2">
+                            <div className="flex items-center justify-between gap-2">
+                              <div className="flex items-center gap-2">
+                                <span
+                                  className={[
+                                    'rounded bg-[#161512] px-2 py-0.5 font-mono text-[11px] font-bold',
+                                    engineMode === 'aggressive'
+                                      ? 'text-orange-400'
+                                      : 'text-sky-400',
+                                  ].join(' ')}
+                                >
+                                  {formatEvaluationScore(localEngineResult)}
+                                </span>
+                                <span className="text-[11px] text-stone-400">
+                                  Depth {localEngineResult.depth}
+                                </span>
+                              </div>
+                              {localEngineResult.bestMoveSan && (
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    playUciMoveIfValid(
+                                      localEngineResult.bestMove,
+                                    )
+                                  }
+                                  className="rounded bg-[#302e2b] px-2 py-0.5 font-mono text-[11px] font-semibold text-stone-100 transition hover:bg-[#3d3a36]"
+                                >
+                                  Best: {localEngineResult.bestMoveSan}
+                                </button>
+                              )}
+                            </div>
+                            {localEngineResult.insights.map((note) => (
+                              <p
+                                key={note}
+                                className="text-[11px] text-stone-400"
+                              >
+                                • {note}
+                              </p>
+                            ))}
+                          </div>
+                        )}
+
+                      {/* Side-by-side Compare mode: Stockfish 19 vs Classical PeSTO */}
+                      {engineMode === 'compare' && (
+                        <div className="flex flex-col gap-1">
+                          <div className="flex items-center justify-between gap-2 rounded bg-[#262421] px-2 py-1.5">
+                            <div className="flex items-center gap-1.5">
+                              <span className="h-2.5 w-2.5 rounded-full bg-green-600" />
+                              <span className="text-[11px] font-semibold text-stone-200">
+                                Stockfish 19
+                              </span>
+                              <span className="font-mono text-[10px] text-stone-500">
+                                d{sfEvaluation.depth}
+                              </span>
+                            </div>
+                            <div className="flex items-center gap-1.5">
+                              <span className="font-mono text-[11px] font-bold text-[#a3d160]">
+                                {formatEvaluationScore(sfEvaluation)}
+                              </span>
+                              {sfEvaluation.bestMove && (
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    playUciMoveIfValid(sfEvaluation.bestMove)
+                                  }
+                                  className="rounded bg-[#302e2b] px-1.5 py-0.5 font-mono text-[11px] text-stone-100 hover:bg-[#3d3a36]"
+                                >
+                                  {uciLineToSan(fen, [sfEvaluation.bestMove], 1)}
+                                </button>
+                              )}
+                            </div>
+                          </div>
+
+                          {localEngineResult && (
+                            <div className="flex items-center justify-between gap-2 rounded bg-[#262421] px-2 py-1.5">
+                              <div className="flex items-center gap-1.5">
+                                <span className="h-2.5 w-2.5 rounded-full bg-blue-500" />
+                                <span className="text-[11px] font-semibold text-stone-200">
+                                  PeSTO Cổ điển
+                                </span>
+                                <span className="font-mono text-[10px] text-stone-500">
+                                  d{localEngineResult.depth}
+                                </span>
+                              </div>
+                              <div className="flex items-center gap-1.5">
+                                <span className="font-mono text-[11px] font-bold text-sky-400">
+                                  {formatEvaluationScore(localEngineResult)}
+                                </span>
+                                {localEngineResult.bestMoveSan && (
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      playUciMoveIfValid(
+                                        localEngineResult.bestMove,
+                                      )
+                                    }
+                                    className="rounded bg-[#302e2b] px-1.5 py-0.5 font-mono text-[11px] text-stone-100 hover:bg-[#3d3a36]"
+                                  >
+                                    {localEngineResult.bestMoveSan}
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+              </>
             )}
           </div>
 
@@ -758,9 +1077,9 @@ export function App() {
           )}
 
           {/* Move List Table */}
-          <div className="min-h-48 flex-1 overflow-y-auto px-2 py-2">
+          <div className="min-h-40 flex-1 overflow-y-auto px-2 py-2">
             {moveRows.length === 0 ? (
-              <div className="flex h-full flex-col items-center justify-center gap-2 py-10 text-center text-stone-500">
+              <div className="flex h-full flex-col items-center justify-center gap-2 py-8 text-center text-stone-500">
                 <p className="text-sm font-medium text-stone-400">
                   Sẵn sàng bắt đầu
                 </p>
