@@ -1,6 +1,7 @@
 import {
   CLASSIFICATION_META,
   type GameReviewResult,
+  type MoveClassification,
 } from '../engine/gameReview'
 
 interface WinRateGraphProps {
@@ -17,7 +18,7 @@ export function WinRateGraph({
   const points: Array<{
     ply: number
     win: number
-    classification?: 'best' | 'good' | 'inaccuracy' | 'mistake' | 'blunder'
+    classification?: MoveClassification
     san?: string
   }> = [
     { ply: 0, win: review.startWinPercent },
@@ -97,9 +98,13 @@ export function WinRateGraph({
           strokeLinejoin="round"
         />
 
-        {/* Mistake / Blunder turning point dots */}
+        {/* Brilliant / Mistake / Blunder turning point dots */}
         {points.map((pt) => {
-          if (pt.classification !== 'blunder' && pt.classification !== 'mistake') {
+          if (
+            pt.classification !== 'blunder' &&
+            pt.classification !== 'mistake' &&
+            pt.classification !== 'brilliant'
+          ) {
             return null
           }
           const meta = CLASSIFICATION_META[pt.classification]
@@ -108,7 +113,7 @@ export function WinRateGraph({
               key={`mark-${pt.ply}`}
               cx={getX(pt.ply)}
               cy={getY(pt.win)}
-              r={pt.classification === 'blunder' ? 3.5 : 2.8}
+              r={pt.classification === 'blunder' || pt.classification === 'brilliant' ? 3.6 : 2.8}
               fill={meta.color}
               stroke="#161512"
               strokeWidth="1"

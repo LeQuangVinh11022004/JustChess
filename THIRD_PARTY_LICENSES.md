@@ -13,7 +13,7 @@ All runtime packages bundled or served to the browser have been audited and are 
 | [js-chess-engine](https://github.com/josefjadrny/js-chess-engine) | `1.0.2` | **MIT** | Compatible |
 | [React](https://react.dev/), `react-dom`, `scheduler` | `19.3.1` / `0.28.0` | **MIT** | Compatible |
 | Staunton SVG piece vectors (`src/components/ChessPiece.tsx`) | — | Based on Colin M.L. Burnett's Staunton SVG set (**GPL-2.0+ / CC BY-SA 3.0**) | Compatible |
-| Sound effects (`src/utils/chessSounds.ts`) | — | 100% synthesized via Web Audio API (no third-party audio samples) | Original code (GPL-3.0) |
+| Recorded chess sound effects (`public/sounds/*.wav`) | — | From [PyChess](https://github.com/pychess/pychess) (**GPL-3.0**) | Native GPL-3.0 |
 
 ## Development / Build-Time Dependencies
 

@@ -9,13 +9,14 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   ChessBoard,
   type BoardArrow,
+  type BoardMoveBadge,
   type LastMove,
   type PendingPromotion,
 } from './components/ChessBoard'
 import { EvaluationBar } from './components/EvaluationBar'
+import { GameReviewPanel } from './components/GameReviewPanel'
 import { ImportModal, type ImportTab } from './components/ImportModal'
 import { PlayerBar } from './components/PlayerBar'
-import { WinRateGraph } from './components/WinRateGraph'
 import type { LocalEngineResult } from './engine/classicalEngine'
 import type {
   ClassicalWorkerRequest,
@@ -24,6 +25,7 @@ import type {
 } from './engine/classicalWorker'
 import {
   CLASSIFICATION_META,
+  classifyLiveMove,
   runFullGameReview,
   type GameReviewResult,
   type ReviewMoveInfo,
@@ -53,6 +55,8 @@ type EngineMode =
   | 'classical'
   | 'aggressive'
   | 'compare'
+
+type SidebarTab = 'game' | 'review' | 'engine'
 
 interface StoredMove {
   from: Square
@@ -279,7 +283,34 @@ export function App() {
     jschess: 0,
   })
 
-  // Full Game Review state (Win-Rate Graph & Blunder/Mistake/Best badges)
+  // Live per-move review context (shows badge immediately on the piece you just moved!)
+  const [liveMoveCtx, setLiveMoveCtx] = useState<{
+    fenAfter: string
+    fenBefore: string
+    ply: number
+    to: Square
+    uci: string
+    san: string
+    color: 'w' | 'b'
+    isCheckmate: boolean
+    before: { cp: number | null; mate: number | null; bestMove: string | null }
+  } | null>(null)
+  const [sfEvalFen, setSfEvalFen] = useState<string>(DEFAULT_POSITION)
+  const sfEvalForFenRef = useRef<{
+    fen: string
+    cp: number | null
+    mate: number | null
+    bestMove: string | null
+  }>({
+    fen: DEFAULT_POSITION,
+    cp: 0,
+    mate: null,
+    bestMove: null,
+  })
+
+  // Full Game Review state (Chess.com-style Coach, Scorecard, Badges & Win-Rate Graph)
+  const [sidebarTab, setSidebarTab] = useState<SidebarTab>('game')
+  const [showBestMoveHint, setShowBestMoveHint] = useState<boolean>(false)
   const [reviewResult, setReviewResult] = useState<GameReviewResult | null>(
     null,
   )
@@ -328,10 +359,61 @@ export function App() {
   const currentReviewMove =
     viewIndex > 0 ? reviewMoveMap.get(viewIndex) ?? null : null
 
+  const liveMoveVerdict = (() => {
+    if (currentReviewMove || !liveMoveCtx || liveMoveCtx.fenAfter !== fen) {
+      return null
+    }
+    const readyAfter =
+      isGameOver ||
+      (sfEvalFen === fen &&
+        (sfEvaluation.depth >= 10 || !sfEvaluation.isSearching))
+    if (!readyAfter) return null
+
+    const afterEval = isCheckmate
+      ? { cp: null, mate: turn === 'w' ? -1 : 1 }
+      : isGameOver
+        ? { cp: 0, mate: null }
+        : { cp: sfEvaluation.cp, mate: sfEvaluation.mate }
+
+    return classifyLiveMove({
+      ply: liveMoveCtx.ply,
+      isStandardStart: startFen === DEFAULT_POSITION,
+      uci: liveMoveCtx.uci,
+      san: liveMoveCtx.san,
+      color: liveMoveCtx.color,
+      fenBefore: liveMoveCtx.fenBefore,
+      before: liveMoveCtx.before,
+      after: afterEval,
+      isCheckmate: liveMoveCtx.isCheckmate,
+    })
+  })()
+
+  const activeMoveBadge: BoardMoveBadge | null = currentReviewMove
+    ? {
+        square: currentReviewMove.to,
+        symbol: CLASSIFICATION_META[currentReviewMove.classification].symbol,
+        color: CLASSIFICATION_META[currentReviewMove.classification].color,
+        textColor:
+          CLASSIFICATION_META[currentReviewMove.classification].badgeText,
+        label: CLASSIFICATION_META[currentReviewMove.classification].label,
+      }
+    : liveMoveCtx && liveMoveVerdict
+      ? {
+          square: liveMoveCtx.to,
+          symbol: CLASSIFICATION_META[liveMoveVerdict.classification].symbol,
+          color: CLASSIFICATION_META[liveMoveVerdict.classification].color,
+          textColor:
+            CLASSIFICATION_META[liveMoveVerdict.classification].badgeText,
+          label: `${liveMoveCtx.san} — ${CLASSIFICATION_META[liveMoveVerdict.classification].label}`,
+        }
+      : null
+
   const needsStockfish =
     engineEnabled &&
     !isGameOver &&
-    (engineMode === 'stockfish' || engineMode === 'compare')
+    (engineMode === 'stockfish' ||
+      engineMode === 'compare' ||
+      (liveMoveCtx !== null && liveMoveCtx.fenAfter === fen))
 
   // Lifecycle: start Stockfish Worker & Classical PeSTO Web Worker once
   useEffect(() => {
@@ -339,6 +421,12 @@ export function App() {
     engineRef.current = service
     service.start((nextEval) => {
       setSfEvaluation(nextEval)
+      sfEvalForFenRef.current = {
+        fen: sfEvalForFenRef.current.fen,
+        cp: nextEval.cp,
+        mate: nextEval.mate,
+        bestMove: nextEval.bestMove,
+      }
     })
 
     const classicalWorker = new Worker(
@@ -378,6 +466,11 @@ export function App() {
     }
 
     const timer = window.setTimeout(() => {
+      sfEvalForFenRef.current = {
+        ...sfEvalForFenRef.current,
+        fen,
+      }
+      setSfEvalFen(fen)
       const multiPv = engineMode === 'stockfish' ? 2 : 1
       service.analyze(fen, ENGINE_DEPTH, multiPv)
     }, 45)
@@ -525,8 +618,26 @@ export function App() {
     return sfEvaluation
   })()
 
-  // Build engine suggestion arrows (supports up to 3 distinct colored arrows in Compare mode!)
+  // Build engine suggestion arrows (or Coach "Best Move" hint arrow in Review tab)
   const engineArrows: BoardArrow[] = (() => {
+    if (
+      sidebarTab === 'review' &&
+      showBestMoveHint &&
+      currentReviewMove?.bestMoveBefore
+    ) {
+      const parsed = parseUciMove(currentReviewMove.bestMoveBefore)
+      if (parsed) {
+        return [
+          {
+            from: parsed.from,
+            to: parsed.to,
+            color: '#81b64c',
+            opacity: 0.9,
+          },
+        ]
+      }
+    }
+
     if (!engineEnabled || !showBestMoveArrow || isGameOver) return []
     const arrows: BoardArrow[] = []
 
@@ -670,6 +781,8 @@ export function App() {
     reviewAbortRef.current = controller
     setReviewError(null)
     setReviewResult(null)
+    setShowBestMoveHint(false)
+    setSidebarTab('review')
     setReviewProgress({ completed: 0, total: targetMoves.length + 1 })
 
     try {
@@ -700,10 +813,27 @@ export function App() {
     : []
   const legalTargets = new Set<Square>(legalMovesForSelected.map((m) => m.to))
 
-  const commitMove = (from: Square, to: Square, promotion?: PieceSymbol) => {
-    const nextGame = buildGameAtPly(startFen, moves, viewIndex)
+  const commitMove = (
+    from: Square,
+    to: Square,
+    promotion?: PieceSymbol,
+    atPly = viewIndex,
+  ) => {
+    const nextGame = buildGameAtPly(startFen, moves, atPly)
+    const fenBefore = nextGame.fen()
+    const moverColor = nextGame.turn()
+    const beforeSnapshot =
+      sfEvalForFenRef.current.fen === fenBefore
+        ? {
+            cp: sfEvalForFenRef.current.cp,
+            mate: sfEvalForFenRef.current.mate,
+            bestMove: sfEvalForFenRef.current.bestMove,
+          }
+        : { cp: 0, mate: null, bestMove: null }
+
     const executed = nextGame.move({ from, to, promotion })
-    const truncated = moves.slice(0, viewIndex)
+    const fenAfter = nextGame.fen()
+    const truncated = moves.slice(0, atPly)
     const updatedMoves: StoredMove[] = [
       ...truncated,
       {
@@ -719,6 +849,17 @@ export function App() {
     }
 
     clearReview()
+    setLiveMoveCtx({
+      fenAfter,
+      fenBefore,
+      ply: updatedMoves.length,
+      to: executed.to,
+      uci: `${executed.from}${executed.to}${executed.promotion ?? ''}`,
+      san: executed.san,
+      color: moverColor,
+      isCheckmate: nextGame.isCheckmate(),
+      before: beforeSnapshot,
+    })
     setMoves(updatedMoves)
     setViewIndex(updatedMoves.length)
     setSelectedSquare(null)
@@ -884,6 +1025,7 @@ export function App() {
       chessSounds.play('move')
     }
     setViewIndex(clamped)
+    setShowBestMoveHint(false)
     setSelectedSquare(null)
     setPendingPromotion(null)
   }
@@ -902,10 +1044,12 @@ export function App() {
     }
   }
 
-  const playUciMoveIfValid = (uci: string | null) => {
+  const playUciMoveIfValid = (uci: string | null, atPly?: number) => {
     const parsed = parseUciMove(uci)
-    if (!parsed || isGameOver) return
-    commitMove(parsed.from, parsed.to, parsed.promotion)
+    if (!parsed) return
+    const targetPly = atPly ?? viewIndex
+    if (atPly === undefined && isGameOver) return
+    commitMove(parsed.from, parsed.to, parsed.promotion, targetPly)
   }
 
   const topColor: 'w' | 'b' = orientation === 'w' ? 'b' : 'w'
@@ -913,60 +1057,40 @@ export function App() {
   const isReviewingEarlier = viewIndex < moves.length
 
   return (
-    <div className="min-h-screen bg-[#161512] text-stone-200">
-      {/* Compact top navigation bar */}
-      <header className="border-b border-white/5 bg-[#211f1c]">
+    <div className="flex min-h-screen flex-col bg-[#1a1917] text-stone-200">
+      {/* Clean, friendly top navigation bar */}
+      <header className="border-b border-white/[0.07] bg-[#24221f]/95 backdrop-blur-sm">
         <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-3 px-4 py-3">
-          <div className="flex items-center gap-2.5">
-            <div className="flex h-8 w-8 items-center justify-center rounded-md bg-[#81b64c] text-lg font-black text-[#161512] shadow-sm">
+          <div className="flex items-center gap-3">
+            <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-[#81b64c] text-xl font-black text-[#161512] shadow-sm">
               ♞
             </div>
             <div>
               <h1 className="text-base leading-tight font-bold tracking-tight text-white">
                 JustChess
               </h1>
-              <p className="text-[11px] text-stone-400">
-                {gameMeta ?? 'Bàn cờ chuẩn thi đấu • Đa Engine & Game Review'}
+              <p className="text-xs text-stone-400">
+                {gameMeta ?? 'Chơi cờ & Phân tích thông minh'}
               </p>
             </div>
           </div>
 
-          <div className="flex flex-wrap items-center gap-2">
-            {/* Search Lichess / Chess.com */}
+          <div className="flex flex-wrap items-center gap-2.5">
+            {/* Primary unified Import CTA */}
             <button
               type="button"
               onClick={() => setImportModalTab('online')}
-              className="rounded-lg bg-[#81b64c] px-3 py-1.5 text-xs font-bold text-[#161512] shadow-sm transition hover:bg-[#95c75d]"
+              className="flex items-center gap-1.5 rounded-lg bg-[#81b64c] px-3.5 py-2 text-xs font-bold text-[#161512] shadow-sm transition hover:bg-[#95c75d]"
             >
-              🔍 Lichess / Chess.com
+              <span>+ Tải ván / Thế cờ</span>
             </button>
 
-            {/* Import FEN / PGN trigger */}
-            <button
-              type="button"
-              onClick={() => setImportModalTab('pgn')}
-              className="rounded-lg bg-[#302e2b] px-3 py-1.5 text-xs font-semibold text-stone-100 ring-1 ring-white/10 transition hover:bg-[#3d3a36]"
+            {/* Compact Theme Swatches */}
+            <div
+              className="flex items-center gap-1 rounded-lg bg-[#1a1917] p-1 ring-1 ring-white/[0.08]"
+              role="group"
+              aria-label="Chọn màu bàn cờ"
             >
-              ⇪ FEN / PGN
-            </button>
-
-            {/* Sound toggle */}
-            <button
-              type="button"
-              onClick={() => setSoundEnabled((prev) => !prev)}
-              title={soundEnabled ? 'Tắt âm thanh' : 'Bật âm thanh'}
-              className={[
-                'rounded-lg px-2.5 py-1.5 text-xs font-semibold ring-1 transition',
-                soundEnabled
-                  ? 'bg-[#302e2b] text-stone-100 ring-white/10 hover:bg-[#3d3a36]'
-                  : 'bg-[#161512] text-stone-500 ring-white/5 hover:text-stone-300',
-              ].join(' ')}
-            >
-              {soundEnabled ? '🔊' : '🔇'}
-            </button>
-
-            {/* Theme switcher */}
-            <div className="flex items-center gap-1 rounded-lg bg-[#161512] p-1 ring-1 ring-white/5">
               {(Object.keys(BOARD_THEMES) as BoardThemeId[]).map((id) => {
                 const t = BOARD_THEMES[id]
                 const active = id === themeId
@@ -975,33 +1099,50 @@ export function App() {
                     key={id}
                     type="button"
                     onClick={() => setThemeId(id)}
-                    title={t.name}
+                    title={`Màu bàn cờ: ${t.name}`}
+                    aria-label={t.name}
                     className={[
-                      'flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium transition',
+                      'flex items-center gap-1.5 rounded-md px-2 py-1.5 text-xs font-medium transition',
                       active
-                        ? 'bg-[#302e2b] text-white shadow-sm'
+                        ? 'bg-[#34312d] text-white shadow-xs ring-1 ring-white/10'
                         : 'text-stone-400 hover:text-stone-200',
                     ].join(' ')}
                   >
-                    <span className="grid h-3.5 w-3.5 grid-cols-2 overflow-hidden rounded-[2px] ring-1 ring-black/40">
+                    <span className="grid h-4 w-4 grid-cols-2 overflow-hidden rounded-[3px] ring-1 ring-black/40">
                       <span style={{ backgroundColor: t.light }} />
                       <span style={{ backgroundColor: t.dark }} />
                       <span style={{ backgroundColor: t.dark }} />
                       <span style={{ backgroundColor: t.light }} />
                     </span>
-                    <span className="hidden xl:inline">{t.name}</span>
+                    <span className="hidden lg:inline">{t.name}</span>
                   </button>
                 )
               })}
             </div>
+
+            {/* Sound toggle */}
+            <button
+              type="button"
+              onClick={() => setSoundEnabled((prev) => !prev)}
+              title={soundEnabled ? 'Tắt âm thanh' : 'Bật âm thanh'}
+              aria-label={soundEnabled ? 'Tắt âm thanh' : 'Bật âm thanh'}
+              className={[
+                'flex h-9 w-9 items-center justify-center rounded-lg text-sm ring-1 transition',
+                soundEnabled
+                  ? 'bg-[#2e2c28] text-stone-100 ring-white/10 hover:bg-[#3d3a36]'
+                  : 'bg-[#1a1917] text-stone-500 ring-white/5 hover:text-stone-300',
+              ].join(' ')}
+            >
+              {soundEnabled ? '🔊' : '🔇'}
+            </button>
           </div>
         </div>
       </header>
 
       {/* Main Arena */}
-      <main className="mx-auto grid max-w-6xl items-start gap-6 px-4 py-6 lg:grid-cols-[minmax(0,636px)_370px] lg:justify-center">
+      <main className="mx-auto grid w-full max-w-6xl flex-1 items-start gap-7 px-4 py-6 lg:grid-cols-[minmax(0,636px)_390px] lg:justify-center">
         {/* Left column: Evaluation Bar + Player Bars + Chessboard */}
-        <section className="flex flex-col items-center gap-2.5">
+        <section className="flex flex-col items-center gap-3">
           {/* Top PlayerBar aligned with chessboard */}
           <div className="flex w-full max-w-[636px] gap-2.5">
             <div className="w-6 shrink-0 sm:w-7" aria-hidden="true" />
@@ -1042,6 +1183,7 @@ export function App() {
                 selectedSquare={selectedSquare}
                 legalTargets={legalTargets}
                 lastMove={lastMove}
+                moveBadge={activeMoveBadge}
                 engineArrows={engineArrows}
                 checkedKingSquare={checkedKingSquare}
                 pendingPromotion={pendingPromotion}
@@ -1076,669 +1218,849 @@ export function App() {
             </div>
           </div>
 
-          {/* Subtle board annotation hint */}
-          <p className="w-full max-w-[636px] pl-8 text-[11px] text-stone-500 sm:pl-9">
-            Chuột phải: nhấp để đánh dấu ô • kéo để vẽ mũi tên (giữ{' '}
-            <span className="text-stone-400">Shift</span> xanh lá,{' '}
-            <span className="text-stone-400">Alt</span> xanh dương,{' '}
-            <span className="text-stone-400">Ctrl</span> vàng)
-          </p>
+          {/* Friendly subtle interaction hint */}
+          <div className="flex w-full max-w-[636px] flex-wrap items-center justify-between gap-2 pl-8 text-[11px] text-stone-500 sm:pl-9">
+            <span>
+              Chuột phải: đánh dấu ô / kéo vẽ mũi tên (
+              <kbd className="rounded bg-white/5 px-1 text-stone-400">
+                Shift
+              </kbd>{' '}
+              <kbd className="rounded bg-white/5 px-1 text-stone-400">Alt</kbd>{' '}
+              <kbd className="rounded bg-white/5 px-1 text-stone-400">Ctrl</kbd>
+              )
+            </span>
+            <span>
+              Phím{' '}
+              <kbd className="rounded bg-white/5 px-1 text-stone-400">←</kbd>{' '}
+              <kbd className="rounded bg-white/5 px-1 text-stone-400">→</kbd>{' '}
+              tua nước đi
+            </span>
+          </div>
         </section>
 
-        {/* Right column: Lichess / Chess.com Sidebar */}
-        <aside className="flex w-full flex-col overflow-hidden rounded-xl bg-[#262421] shadow-xl ring-1 ring-white/5 lg:max-h-[760px] lg:min-h-[716px]">
+        {/* Right column: Spacious 3-Tab Sidebar */}
+        <aside className="flex w-full flex-col overflow-hidden rounded-2xl bg-[#262421] shadow-2xl ring-1 ring-white/[0.08] lg:h-[736px]">
           {/* Status Header */}
           <div
             className={[
-              'flex items-center justify-between gap-2 border-b border-white/5 px-4 py-2.5 text-sm font-semibold',
+              'flex items-center justify-between gap-2 border-b border-white/[0.07] px-4 py-3 text-sm font-bold',
               status.tone === 'over'
-                ? 'bg-[#81b64c]/15 text-[#a3d160]'
+                ? 'bg-[#81b64c]/18 text-[#b4e07c]'
                 : status.tone === 'check'
-                  ? 'bg-red-500/15 text-red-400'
-                  : 'bg-[#2c2a27] text-stone-200',
+                  ? 'bg-red-500/18 text-red-300'
+                  : 'bg-[#2c2a26] text-stone-100',
             ].join(' ')}
           >
             <span className="truncate">{status.text}</span>
             {moves.length > 0 && (
-              <span className="shrink-0 rounded bg-black/25 px-2 py-0.5 font-mono text-[11px] text-stone-400">
-                {viewIndex}/{moves.length}
+              <span className="shrink-0 rounded-md bg-black/30 px-2.5 py-0.5 font-mono text-xs text-stone-300">
+                Nước {viewIndex}/{moves.length}
               </span>
             )}
           </div>
 
-          {/* Full Game Review & Win-Rate Graph Section */}
-          {moves.length > 0 && (
-            <div className="border-b border-white/5 bg-[#1b1917] px-3.5 py-2.5">
-              {reviewProgress ? (
-                <div className="flex flex-col gap-1.5">
-                  <div className="flex items-center justify-between text-xs">
-                    <span className="font-medium text-stone-200">
-                      Đang phân tích toàn ván ({reviewProgress.completed}/
-                      {reviewProgress.total})
-                    </span>
-                    <button
-                      type="button"
-                      onClick={cancelReview}
-                      className="rounded bg-[#302e2b] px-2 py-0.5 text-[11px] text-stone-300 hover:bg-[#3d3a36]"
-                    >
-                      Dừng
-                    </button>
-                  </div>
-                  <div className="h-2 overflow-hidden rounded-full bg-[#302e2b]">
-                    <div
-                      className="h-full bg-[#81b64c] transition-[width] duration-200"
-                      style={{
-                        width: `${Math.round((reviewProgress.completed / Math.max(1, reviewProgress.total)) * 100)}%`,
-                      }}
-                    />
-                  </div>
-                </div>
-              ) : reviewResult ? (
-                <div className="flex flex-col gap-2">
-                  <WinRateGraph
-                    review={reviewResult}
-                    currentPly={viewIndex}
-                    onSelectPly={jumpToPly}
-                  />
-                  {currentReviewMove && (
-                    <div
-                      className="flex items-center justify-between rounded px-2.5 py-1 text-xs"
+          {/* 3 Clear Sidebar Tabs */}
+          <div className="grid grid-cols-3 gap-1 border-b border-white/[0.07] bg-[#1e1c1a] p-1.5">
+            <button
+              type="button"
+              onClick={() => setSidebarTab('game')}
+              className={[
+                'rounded-lg py-2 text-xs font-semibold transition',
+                sidebarTab === 'game'
+                  ? 'bg-[#34312d] text-white shadow-xs'
+                  : 'text-stone-400 hover:text-stone-200',
+              ].join(' ')}
+            >
+              ♟ Ván đấu
+            </button>
+            <button
+              type="button"
+              onClick={() => setSidebarTab('review')}
+              className={[
+                'flex items-center justify-center gap-1.5 rounded-lg py-2 text-xs font-semibold transition',
+                sidebarTab === 'review'
+                  ? 'bg-[#34312d] text-white shadow-xs'
+                  : 'text-stone-400 hover:text-stone-200',
+              ].join(' ')}
+            >
+              <span>📊 Đánh giá</span>
+              {reviewResult && (
+                <span className="h-2 w-2 rounded-full bg-[#81b64c]" />
+              )}
+            </button>
+            <button
+              type="button"
+              onClick={() => setSidebarTab('engine')}
+              className={[
+                'flex items-center justify-center gap-1.5 rounded-lg py-2 text-xs font-semibold transition',
+                sidebarTab === 'engine'
+                  ? 'bg-[#34312d] text-white shadow-xs'
+                  : 'text-stone-400 hover:text-stone-200',
+              ].join(' ')}
+            >
+              <span>🧠 Engine</span>
+              {engineEnabled && (
+                <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+              )}
+            </button>
+          </div>
+
+          {/* TAB 1: VÁN ĐẤU (Clean Move List + Live Move Feedback + Quick Review CTA) */}
+          {sidebarTab === 'game' && (
+            <div className="flex min-h-0 flex-1 flex-col">
+              {/* Live instant feedback strip for the move just played */}
+              {liveMoveCtx && liveMoveVerdict && (
+                <div
+                  className="border-b border-white/[0.07] px-4 py-2.5"
+                  style={{
+                    backgroundColor:
+                      CLASSIFICATION_META[liveMoveVerdict.classification].bg,
+                  }}
+                >
+                  <div className="flex items-center gap-2 text-xs">
+                    <span
+                      className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[10px] font-black"
                       style={{
                         backgroundColor:
-                          CLASSIFICATION_META[currentReviewMove.classification]
-                            .bg,
+                          CLASSIFICATION_META[liveMoveVerdict.classification]
+                            .color,
+                        color:
+                          CLASSIFICATION_META[liveMoveVerdict.classification]
+                            .badgeText,
                       }}
                     >
-                      <span className="font-semibold text-stone-100">
-                        {currentReviewMove.san}{' '}
-                        <span
-                          style={{
-                            color:
-                              CLASSIFICATION_META[
-                                currentReviewMove.classification
-                              ].color,
-                          }}
-                        >
-                          {
-                            CLASSIFICATION_META[
-                              currentReviewMove.classification
-                            ].symbol
-                          }{' '}
-                          {
-                            CLASSIFICATION_META[
-                              currentReviewMove.classification
-                            ].label
-                          }
-                        </span>
-                      </span>
-                      {currentReviewMove.winLoss >= 1 && (
-                        <span className="font-mono text-[11px] text-stone-300">
-                          -{Math.round(currentReviewMove.winLoss)}% Win
-                        </span>
-                      )}
-                    </div>
+                      {
+                        CLASSIFICATION_META[liveMoveVerdict.classification]
+                          .symbol
+                      }
+                    </span>
+                    <span className="font-mono font-bold text-white">
+                      {liveMoveCtx.san}
+                    </span>
+                    <span
+                      className="font-bold"
+                      style={{
+                        color:
+                          CLASSIFICATION_META[liveMoveVerdict.classification]
+                            .color,
+                      }}
+                    >
+                      {
+                        CLASSIFICATION_META[liveMoveVerdict.classification]
+                          .label
+                      }
+                    </span>
+                  </div>
+                  <p className="mt-1 text-xs leading-relaxed text-stone-200">
+                    {liveMoveVerdict.commentary}
+                  </p>
+                </div>
+              )}
+
+              {/* Compact 1-line Quick Engine Bar */}
+              {engineEnabled && !isGameOver && (
+                <div className="flex items-center justify-between gap-2 border-b border-white/[0.06] bg-[#1f1d1a] px-4 py-2 text-xs">
+                  <div className="flex items-center gap-2">
+                    <span className="rounded bg-[#2e2c28] px-2 py-0.5 font-mono text-xs font-bold text-[#a3d160]">
+                      {formatEvaluationScore(activeEvalForBar)}
+                    </span>
+                    <span className="text-stone-400">
+                      {ENGINE_MODES.find((m) => m.id === engineMode)?.label}
+                    </span>
+                  </div>
+                  {activeEvalForBar.bestMove && (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        playUciMoveIfValid(activeEvalForBar.bestMove)
+                      }
+                      className="rounded-md bg-[#2e2c28] px-2.5 py-1 font-mono text-xs font-semibold text-stone-100 transition hover:bg-[#3d3a36]"
+                    >
+                      Gợi ý:{' '}
+                      {uciLineToSan(fen, [activeEvalForBar.bestMove], 1)}
+                    </button>
                   )}
                 </div>
-              ) : (
-                <div className="flex items-center justify-between gap-2">
-                  <span className="text-[11px] text-stone-400">
-                    Chấm điểm Best / Mistake / Blunder &amp; vẽ Win-Rate
+              )}
+
+              {/* Reviewing earlier ply banner */}
+              {isReviewingEarlier && (
+                <div className="flex items-center justify-between border-b border-amber-500/20 bg-amber-500/10 px-4 py-1.5 text-xs text-amber-300">
+                  <span>
+                    Đang xem lại nước {viewIndex}/{moves.length}
                   </span>
                   <button
                     type="button"
-                    onClick={() => void startGameReview()}
-                    className="shrink-0 rounded-md bg-[#81b64c] px-2.5 py-1 text-[11px] font-bold text-[#161512] transition hover:bg-[#95c75d]"
+                    onClick={() => jumpToPly(moves.length)}
+                    className="font-semibold underline hover:text-amber-200"
                   >
-                    📊 Phân tích ván
+                    Tới nước cuối
                   </button>
                 </div>
               )}
 
-              {reviewError && (
-                <p className="mt-1.5 text-[11px] text-red-400">{reviewError}</p>
+              {/* Spacious 2-column Move List */}
+              <div className="min-h-52 flex-1 overflow-y-auto px-3 py-2.5">
+                {moveRows.length === 0 ? (
+                  <div className="flex h-full flex-col items-center justify-center gap-3 py-10 text-center">
+                    <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-white/[0.04] text-2xl">
+                      ♟
+                    </div>
+                    <div>
+                      <p className="text-sm font-bold text-stone-200">
+                        Sẵn sàng bắt đầu ván mới
+                      </p>
+                      <p className="mt-1 max-w-[260px] text-xs leading-relaxed text-stone-400">
+                        Kéo thả hoặc nhấp chọn quân Trắng để đi, hoặc tải ván đấu
+                        có sẵn để phân tích.
+                      </p>
+                    </div>
+                    <div className="mt-1 flex flex-wrap justify-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setImportModalTab('online')}
+                        className="rounded-lg bg-[#81b64c] px-3.5 py-2 text-xs font-bold text-[#161512] transition hover:bg-[#95c75d]"
+                      >
+                        🔍 Tìm ván Lichess / Chess.com
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setImportModalTab('pgn')}
+                        className="rounded-lg bg-[#34312d] px-3.5 py-2 text-xs font-semibold text-stone-200 transition hover:bg-[#423f3a]"
+                      >
+                        Dán PGN / FEN
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="font-mono text-sm">
+                    {moveRows.map((row, idx) => {
+                      const whiteReview = row.white
+                        ? reviewMoveMap.get(row.white.ply)
+                        : undefined
+                      const blackReview = row.black
+                        ? reviewMoveMap.get(row.black.ply)
+                        : undefined
+
+                      return (
+                        <div
+                          key={`${row.moveNumber}-${idx}`}
+                          className={[
+                            'grid grid-cols-[42px_1fr_1fr] items-center rounded-lg px-2 py-0.5',
+                            idx % 2 === 1 ? 'bg-white/[0.025]' : '',
+                          ].join(' ')}
+                        >
+                          <span className="text-xs text-stone-500">
+                            {row.moveNumber}.
+                          </span>
+
+                          {row.white ? (
+                            <button
+                              ref={
+                                viewIndex === row.white.ply
+                                  ? activeMoveRef
+                                  : null
+                              }
+                              type="button"
+                              onClick={() => jumpToPly(row.white!.ply)}
+                              className={[
+                                'flex items-center justify-between gap-1 rounded-md px-2.5 py-1.5 text-left font-medium transition',
+                                viewIndex === row.white.ply
+                                  ? 'bg-[#81b64c]/30 text-[#dcf7b7]'
+                                  : 'text-stone-100 hover:bg-white/10',
+                              ].join(' ')}
+                            >
+                              <span>{row.white.san}</span>
+                              {whiteReview &&
+                                whiteReview.classification !== 'good' && (
+                                  <span
+                                    title={
+                                      CLASSIFICATION_META[
+                                        whiteReview.classification
+                                      ].label
+                                    }
+                                    style={{
+                                      color:
+                                        CLASSIFICATION_META[
+                                          whiteReview.classification
+                                        ].color,
+                                    }}
+                                    className="text-xs font-black"
+                                  >
+                                    {
+                                      CLASSIFICATION_META[
+                                        whiteReview.classification
+                                      ].symbol
+                                    }
+                                  </span>
+                                )}
+                            </button>
+                          ) : (
+                            <span className="px-2.5 py-1.5 text-stone-600">
+                              ...
+                            </span>
+                          )}
+
+                          {row.black ? (
+                            <button
+                              ref={
+                                viewIndex === row.black.ply
+                                  ? activeMoveRef
+                                  : null
+                              }
+                              type="button"
+                              onClick={() => jumpToPly(row.black!.ply)}
+                              className={[
+                                'flex items-center justify-between gap-1 rounded-md px-2.5 py-1.5 text-left font-medium transition',
+                                viewIndex === row.black.ply
+                                  ? 'bg-[#81b64c]/30 text-[#dcf7b7]'
+                                  : 'text-stone-300 hover:bg-white/10',
+                              ].join(' ')}
+                            >
+                              <span>{row.black.san}</span>
+                              {blackReview &&
+                                blackReview.classification !== 'good' && (
+                                  <span
+                                    title={
+                                      CLASSIFICATION_META[
+                                        blackReview.classification
+                                      ].label
+                                    }
+                                    style={{
+                                      color:
+                                        CLASSIFICATION_META[
+                                          blackReview.classification
+                                        ].color,
+                                    }}
+                                    className="text-xs font-black"
+                                  >
+                                    {
+                                      CLASSIFICATION_META[
+                                        blackReview.classification
+                                      ].symbol
+                                    }
+                                  </span>
+                                )}
+                            </button>
+                          ) : (
+                            <span />
+                          )}
+                        </div>
+                      )
+                    })}
+                  </div>
+                )}
+              </div>
+
+              {/* Quick Game Review banner when game has moves but not yet reviewed */}
+              {moves.length >= 2 && !reviewResult && !reviewProgress && (
+                <div className="border-t border-white/[0.06] bg-[#1f1d1a] px-4 py-2.5">
+                  <button
+                    type="button"
+                    onClick={() => void startGameReview()}
+                    className="w-full rounded-lg bg-[#81b64c]/18 py-2 text-xs font-bold text-[#b4e07c] ring-1 ring-[#81b64c]/35 transition hover:bg-[#81b64c]/28"
+                  >
+                    📊 Chấm điểm toàn ván (Game Review)
+                  </button>
+                </div>
               )}
             </div>
           )}
 
-          {/* Multi-Engine Analysis Panel */}
-          <div className="border-b border-white/5 bg-[#1e1c1a] px-3.5 py-2.5">
-            <div className="flex items-center justify-between gap-2">
-              <div className="flex items-center gap-2">
-                <span
-                  className={[
-                    'h-2 w-2 rounded-full',
-                    !engineEnabled
-                      ? 'bg-stone-600'
-                      : sfEvaluation.error && needsStockfish
-                        ? 'bg-red-500'
-                        : sfEvaluation.isSearching && needsStockfish
-                          ? 'animate-pulse bg-amber-400'
-                          : 'bg-[#81b64c]',
-                  ].join(' ')}
-                />
-                <span className="text-xs font-semibold text-stone-200">
-                  Phân tích Engine
-                </span>
-              </div>
-
-              <div className="flex items-center gap-1.5">
-                {engineEnabled && (
-                  <button
-                    type="button"
-                    onClick={() => setShowBestMoveArrow((prev) => !prev)}
-                    title="Bật/tắt mũi tên gợi ý từ Engine"
-                    className={[
-                      'rounded px-2 py-0.5 text-[11px] font-medium transition',
-                      showBestMoveArrow
-                        ? 'bg-[#81b64c]/20 text-[#a3d160]'
-                        : 'bg-[#302e2b] text-stone-400 hover:text-stone-200',
-                    ].join(' ')}
-                  >
-                    ↗ Mũi tên
-                  </button>
-                )}
+          {/* TAB 2: ĐÁNH GIÁ (Chess.com-style Game Review) */}
+          {sidebarTab === 'review' &&
+            (reviewProgress ? (
+              <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 py-10 text-center">
+                <div className="text-4xl">🎓</div>
+                <div className="text-sm font-bold text-white">
+                  Stockfish 19 đang chấm điểm ván đấu...
+                </div>
+                <p className="text-xs text-stone-400">
+                  Đang phân tích nước {reviewProgress.completed} /{' '}
+                  {reviewProgress.total}
+                </p>
+                <div className="h-2.5 w-full max-w-[260px] overflow-hidden rounded-full bg-[#34312d]">
+                  <div
+                    className="h-full bg-[#81b64c] transition-[width] duration-200"
+                    style={{
+                      width: `${Math.round((reviewProgress.completed / Math.max(1, reviewProgress.total)) * 100)}%`,
+                    }}
+                  />
+                </div>
                 <button
                   type="button"
-                  onClick={() => setEngineEnabled((prev) => !prev)}
-                  className={[
-                    'rounded px-2 py-0.5 text-[11px] font-semibold transition',
-                    engineEnabled
-                      ? 'bg-[#81b64c] text-[#161512]'
-                      : 'bg-[#302e2b] text-stone-400 hover:text-stone-200',
-                  ].join(' ')}
+                  onClick={cancelReview}
+                  className="mt-1 rounded-lg bg-[#34312d] px-4 py-2 text-xs font-semibold text-stone-200 hover:bg-[#423f3a]"
                 >
-                  {engineEnabled ? 'Bật' : 'Tắt'}
+                  Hủy phân tích
                 </button>
               </div>
-            </div>
+            ) : reviewResult ? (
+              <GameReviewPanel
+                review={reviewResult}
+                whiteName={players.white}
+                blackName={players.black}
+                currentPly={viewIndex}
+                totalPlies={moves.length}
+                showBestMoveHint={showBestMoveHint}
+                onToggleBestMoveHint={() =>
+                  setShowBestMoveHint((prev) => !prev)
+                }
+                onSelectPly={jumpToPly}
+                onPlayBestMove={(uci, atPly) => playUciMoveIfValid(uci, atPly)}
+                onReRunReview={() => void startGameReview()}
+              />
+            ) : (
+              <div className="flex flex-1 flex-col items-center justify-center gap-3.5 px-6 py-10 text-center">
+                <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-[#81b64c]/15 text-3xl ring-1 ring-[#81b64c]/30">
+                  🎓
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-white">
+                    Game Review kiểu Chess.com
+                  </h3>
+                  <p className="mt-1.5 text-xs leading-relaxed text-stone-400">
+                    Chấm điểm Accuracy %, Elo ước tính, gắn huy hiệu{' '}
+                    <span className="font-bold text-[#1baca6]">!!</span>{' '}
+                    <span className="font-bold text-[#81b64c]">★</span>{' '}
+                    <span className="font-bold text-[#e6912c]">?</span>{' '}
+                    <span className="font-bold text-[#ca3431]">??</span> trực tiếp
+                    trên bàn cờ và HLV nhận xét từng nước đi.
+                  </p>
+                </div>
 
-            {engineEnabled && (
-              <>
-                {/* Engine Mode Selector */}
-                <div className="mt-2 grid grid-cols-3 gap-1 rounded-lg bg-[#161512] p-1 ring-1 ring-white/5">
-                  {ENGINE_MODES.map((m) => (
+                {moves.length > 0 ? (
+                  <button
+                    type="button"
+                    onClick={() => void startGameReview()}
+                    className="rounded-lg bg-[#81b64c] px-5 py-2.5 text-xs font-bold text-[#161512] shadow-md transition hover:bg-[#95c75d]"
+                  >
+                    📊 Bắt đầu Game Review ({moves.length} nước)
+                  </button>
+                ) : (
+                  <div className="flex flex-wrap justify-center gap-2">
                     <button
-                      key={m.id}
                       type="button"
-                      onClick={() => setEngineMode(m.id)}
-                      title={m.desc}
+                      onClick={() => setImportModalTab('online')}
+                      className="rounded-lg bg-[#81b64c] px-3.5 py-2 text-xs font-bold text-[#161512] transition hover:bg-[#95c75d]"
+                    >
+                      🔍 Tải ván Lichess / Chess.com
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setImportModalTab('pgn')}
+                      className="rounded-lg bg-[#34312d] px-3.5 py-2 text-xs font-semibold text-stone-200 transition hover:bg-[#423f3a]"
+                    >
+                      Dán PGN
+                    </button>
+                  </div>
+                )}
+
+                {reviewError && (
+                  <p className="text-xs text-red-400">{reviewError}</p>
+                )}
+              </div>
+            ))}
+
+          {/* TAB 3: ĐA ENGINE (Dedicated Spacious Analysis Lab) */}
+          {sidebarTab === 'engine' && (
+            <div className="flex flex-1 flex-col gap-3.5 overflow-y-auto p-4">
+              <div className="flex items-center justify-between gap-2 rounded-xl bg-[#1f1d1a] px-3.5 py-2.5 ring-1 ring-white/[0.06]">
+                <div className="flex items-center gap-2">
+                  <span
+                    className={[
+                      'h-2.5 w-2.5 rounded-full',
+                      !engineEnabled
+                        ? 'bg-stone-600'
+                        : sfEvaluation.error && needsStockfish
+                          ? 'bg-red-500'
+                          : sfEvaluation.isSearching && needsStockfish
+                            ? 'animate-pulse bg-amber-400'
+                            : 'bg-[#81b64c]',
+                    ].join(' ')}
+                  />
+                  <span className="text-xs font-bold text-stone-100">
+                    Trạng thái Engine
+                  </span>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  {engineEnabled && (
+                    <button
+                      type="button"
+                      onClick={() => setShowBestMoveArrow((prev) => !prev)}
                       className={[
-                        'truncate rounded-md px-1.5 py-1 text-[11px] font-medium transition',
-                        engineMode === m.id
-                          ? 'bg-[#302e2b] text-white shadow-sm'
-                          : 'text-stone-400 hover:text-stone-200',
+                        'rounded-md px-2.5 py-1 text-xs font-semibold transition',
+                        showBestMoveArrow
+                          ? 'bg-[#81b64c]/20 text-[#b4e07c]'
+                          : 'bg-[#302e2b] text-stone-400 hover:text-stone-200',
                       ].join(' ')}
                     >
-                      {m.label}
+                      ↗ Mũi tên
                     </button>
-                  ))}
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => setEngineEnabled((prev) => !prev)}
+                    className={[
+                      'rounded-md px-3 py-1 text-xs font-bold transition',
+                      engineEnabled
+                        ? 'bg-[#81b64c] text-[#161512]'
+                        : 'bg-[#302e2b] text-stone-300 hover:bg-[#3d3a36]',
+                    ].join(' ')}
+                  >
+                    {engineEnabled ? 'Đang bật' : 'Đang tắt'}
+                  </button>
                 </div>
+              </div>
 
-                {/* Engine Output Area */}
-                <div className="mt-2 flex flex-col gap-1.5 text-xs">
-                  {sfEvaluation.error && needsStockfish ? (
-                    <span className="text-red-400">{sfEvaluation.error}</span>
-                  ) : isGameOver ? (
-                    <span className="text-[11px] text-stone-400">
-                      Ván đấu đã kết thúc.
-                    </span>
-                  ) : (
-                    <>
-                      {/* Stockfish 19 MultiPV lines */}
-                      {engineMode === 'stockfish' && (
-                        <div className="flex flex-col gap-1">
-                          {sfEvaluation.lines.length === 0 ? (
-                            <span className="text-[11px] text-stone-400">
-                              {sfEvaluation.isReady
-                                ? 'Stockfish 19 đang tính toán...'
-                                : 'Đang tải Stockfish WASM...'}
-                            </span>
-                          ) : (
-                            sfEvaluation.lines.map((line) => (
-                              <button
-                                key={line.multipv}
-                                type="button"
-                                onClick={() =>
-                                  playUciMoveIfValid(line.pv[0] ?? null)
-                                }
-                                title="Nhấp để đi nước đầu tiên của nhánh này"
-                                className="flex items-center gap-2 rounded bg-[#262421] px-2 py-1 text-left transition hover:bg-[#302e2b]"
-                              >
-                                <span className="w-11 shrink-0 rounded bg-[#161512] py-0.5 text-center font-mono text-[11px] font-bold text-[#a3d160]">
-                                  {formatEvaluationScore(line)}
-                                </span>
-                                <span className="truncate font-mono text-[11px] text-stone-200">
-                                  {uciLineToSan(fen, line.pv, 5)}
-                                </span>
-                                <span className="ml-auto shrink-0 font-mono text-[10px] text-stone-500">
-                                  d{line.depth}
-                                </span>
-                              </button>
-                            ))
-                          )}
-                        </div>
-                      )}
+              {engineEnabled && (
+                <>
+                  {/* Engine Mode Cards */}
+                  <div className="grid grid-cols-2 gap-2">
+                    {ENGINE_MODES.map((m) => (
+                      <button
+                        key={m.id}
+                        type="button"
+                        onClick={() => setEngineMode(m.id)}
+                        className={[
+                          'flex flex-col items-start rounded-xl px-3 py-2 text-left transition',
+                          engineMode === m.id
+                            ? 'bg-[#34312d] text-white shadow-sm ring-1 ring-[#81b64c]/60'
+                            : 'bg-[#1f1d1a] text-stone-300 ring-1 ring-white/[0.05] hover:bg-[#2c2a26]',
+                        ].join(' ')}
+                      >
+                        <span className="text-xs font-bold">{m.label}</span>
+                        <span className="mt-0.5 text-[10px] text-stone-400">
+                          {m.desc}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
 
-                      {/* Lichess Cloud Eval (Depth 30-60+) */}
-                      {engineMode === 'cloud' && (
-                        <div className="flex flex-col gap-1">
-                          {isCloudLoading ? (
-                            <span className="text-[11px] text-stone-400">
-                              Đang tra cứu Lichess Cloud Eval...
-                            </span>
-                          ) : cloudError ? (
-                            <span className="text-[11px] text-red-400">
-                              {cloudError}
-                            </span>
-                          ) : !activeCloudResult ? (
-                            <div className="rounded bg-[#262421] px-2.5 py-2 text-[11px] text-stone-400">
-                              Thế cờ này chưa có trong bộ nhớ Cloud của Lichess.
-                              Hãy chuyển sang{' '}
-                              <button
-                                type="button"
-                                onClick={() => setEngineMode('stockfish')}
-                                className="font-semibold text-[#a3d160] underline"
-                              >
-                                Stockfish 19 Local
-                              </button>{' '}
-                              để phân tích trực tiếp.
-                            </div>
-                          ) : (
-                            <>
-                              <div className="flex items-center justify-between px-1 text-[10px] text-stone-400">
-                                <span>
-                                  Lichess Cloud • Depth{' '}
-                                  <strong className="text-cyan-400">
-                                    {activeCloudResult.depth}
-                                  </strong>
-                                </span>
-                                <span className="font-mono">
-                                  {Math.round(activeCloudResult.knodes / 1000)}M
-                                  nodes
-                                </span>
-                              </div>
-                              {activeCloudResult.lines.map((line, idx) => (
+                  {/* Engine Output Area */}
+                  <div className="flex flex-col gap-2 rounded-xl bg-[#1f1d1a] p-3 ring-1 ring-white/[0.06]">
+                    {sfEvaluation.error && needsStockfish ? (
+                      <span className="text-xs text-red-400">
+                        {sfEvaluation.error}
+                      </span>
+                    ) : isGameOver ? (
+                      <span className="text-xs text-stone-400">
+                        Ván đấu đã kết thúc.
+                      </span>
+                    ) : (
+                      <>
+                        {/* Stockfish 19 MultiPV lines */}
+                        {engineMode === 'stockfish' && (
+                          <div className="flex flex-col gap-1.5">
+                            {sfEvaluation.lines.length === 0 ? (
+                              <span className="text-xs text-stone-400">
+                                {sfEvaluation.isReady
+                                  ? 'Stockfish 19 đang tính toán...'
+                                  : 'Đang tải Stockfish WASM...'}
+                              </span>
+                            ) : (
+                              sfEvaluation.lines.map((line) => (
                                 <button
-                                  key={idx}
+                                  key={line.multipv}
                                   type="button"
                                   onClick={() =>
-                                    playUciMoveIfValid(line.moves[0] ?? null)
+                                    playUciMoveIfValid(line.pv[0] ?? null)
                                   }
-                                  className="flex items-center gap-2 rounded bg-[#262421] px-2 py-1 text-left transition hover:bg-[#302e2b]"
+                                  title="Nhấp để đi nước đầu tiên của nhánh này"
+                                  className="flex items-center gap-2.5 rounded-lg bg-[#2a2824] px-2.5 py-2 text-left transition hover:bg-[#36332e]"
                                 >
-                                  <span className="w-11 shrink-0 rounded bg-[#161512] py-0.5 text-center font-mono text-[11px] font-bold text-cyan-400">
+                                  <span className="w-12 shrink-0 rounded bg-[#1a1917] py-1 text-center font-mono text-xs font-bold text-[#a3d160]">
                                     {formatEvaluationScore(line)}
                                   </span>
-                                  <span className="truncate font-mono text-[11px] text-stone-200">
-                                    {uciLineToSan(fen, line.moves, 5)}
+                                  <span className="truncate font-mono text-xs text-stone-200">
+                                    {uciLineToSan(fen, line.pv, 5)}
+                                  </span>
+                                  <span className="ml-auto shrink-0 font-mono text-[10px] text-stone-500">
+                                    d{line.depth}
                                   </span>
                                 </button>
-                              ))}
-                            </>
-                          )}
-                        </div>
-                      )}
+                              ))
+                            )}
+                          </div>
+                        )}
 
-                      {/* Single local worker engine output (PeSTO / Aggressive / js-chess-engine) */}
-                      {(engineMode === 'classical' ||
-                        engineMode === 'aggressive' ||
-                        engineMode === 'jschess') &&
-                        (activeSingleLocalResult ? (
-                          <div className="flex flex-col gap-1.5 rounded bg-[#262421] p-2">
-                            <div className="flex items-center justify-between gap-2">
-                              <div className="flex items-center gap-2">
-                                <span
-                                  className={[
-                                    'rounded bg-[#161512] px-2 py-0.5 font-mono text-[11px] font-bold',
-                                    engineMode === 'aggressive'
-                                      ? 'text-orange-400'
-                                      : engineMode === 'jschess'
-                                        ? 'text-purple-400'
-                                        : 'text-sky-400',
-                                  ].join(' ')}
+                        {/* Lichess Cloud Eval */}
+                        {engineMode === 'cloud' && (
+                          <div className="flex flex-col gap-1.5">
+                            {isCloudLoading ? (
+                              <span className="text-xs text-stone-400">
+                                Đang tra cứu Lichess Cloud Eval...
+                              </span>
+                            ) : cloudError ? (
+                              <span className="text-xs text-red-400">
+                                {cloudError}
+                              </span>
+                            ) : !activeCloudResult ? (
+                              <div className="text-xs leading-relaxed text-stone-400">
+                                Thế cờ này chưa có trong bộ nhớ Cloud của
+                                Lichess. Chuyển sang{' '}
+                                <button
+                                  type="button"
+                                  onClick={() => setEngineMode('stockfish')}
+                                  className="font-semibold text-[#a3d160] underline"
                                 >
-                                  {formatEvaluationScore(
-                                    activeSingleLocalResult,
-                                  )}
+                                  Stockfish 19
+                                </button>{' '}
+                                để phân tích cục bộ.
+                              </div>
+                            ) : (
+                              <>
+                                <div className="flex items-center justify-between text-[11px] text-stone-400">
+                                  <span>
+                                    Lichess Cloud • Depth{' '}
+                                    <strong className="text-cyan-400">
+                                      {activeCloudResult.depth}
+                                    </strong>
+                                  </span>
+                                  <span className="font-mono">
+                                    {Math.round(
+                                      activeCloudResult.knodes / 1000,
+                                    )}
+                                    M nodes
+                                  </span>
+                                </div>
+                                {activeCloudResult.lines.map((line, idx) => (
+                                  <button
+                                    key={idx}
+                                    type="button"
+                                    onClick={() =>
+                                      playUciMoveIfValid(line.moves[0] ?? null)
+                                    }
+                                    className="flex items-center gap-2.5 rounded-lg bg-[#2a2824] px-2.5 py-2 text-left transition hover:bg-[#36332e]"
+                                  >
+                                    <span className="w-12 shrink-0 rounded bg-[#1a1917] py-1 text-center font-mono text-xs font-bold text-cyan-400">
+                                      {formatEvaluationScore(line)}
+                                    </span>
+                                    <span className="truncate font-mono text-xs text-stone-200">
+                                      {uciLineToSan(fen, line.moves, 5)}
+                                    </span>
+                                  </button>
+                                ))}
+                              </>
+                            )}
+                          </div>
+                        )}
+
+                        {/* Single local worker engine output */}
+                        {(engineMode === 'classical' ||
+                          engineMode === 'aggressive' ||
+                          engineMode === 'jschess') &&
+                          (activeSingleLocalResult ? (
+                            <div className="flex flex-col gap-2">
+                              <div className="flex items-center justify-between gap-2">
+                                <div className="flex items-center gap-2">
+                                  <span
+                                    className={[
+                                      'rounded bg-[#1a1917] px-2.5 py-1 font-mono text-xs font-bold',
+                                      engineMode === 'aggressive'
+                                        ? 'text-orange-400'
+                                        : engineMode === 'jschess'
+                                          ? 'text-purple-400'
+                                          : 'text-sky-400',
+                                    ].join(' ')}
+                                  >
+                                    {formatEvaluationScore(
+                                      activeSingleLocalResult,
+                                    )}
+                                  </span>
+                                  <span className="text-xs text-stone-400">
+                                    Depth {activeSingleLocalResult.depth}
+                                  </span>
+                                </div>
+                                {activeSingleLocalResult.bestMoveSan && (
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      playUciMoveIfValid(
+                                        activeSingleLocalResult.bestMove,
+                                      )
+                                    }
+                                    className="rounded-lg bg-[#34312d] px-3 py-1 font-mono text-xs font-bold text-stone-100 transition hover:bg-[#423f3a]"
+                                  >
+                                    Đi {activeSingleLocalResult.bestMoveSan}
+                                  </button>
+                                )}
+                              </div>
+                              {activeSingleLocalResult.insights.map((note) => (
+                                <p
+                                  key={note}
+                                  className="text-xs leading-relaxed text-stone-300"
+                                >
+                                  • {note}
+                                </p>
+                              ))}
+                            </div>
+                          ) : (
+                            <span className="text-xs text-stone-400">
+                              Đang tính toán trên Web Worker...
+                            </span>
+                          ))}
+
+                        {/* Compare 3 Engines side-by-side */}
+                        {engineMode === 'compare' && (
+                          <div className="flex flex-col gap-2">
+                            <div className="flex items-center justify-between gap-2 rounded-lg bg-[#2a2824] px-3 py-2">
+                              <div className="flex items-center gap-2">
+                                <span className="h-3 w-3 rounded-full bg-green-600" />
+                                <span className="text-xs font-semibold text-stone-100">
+                                  Stockfish 19
                                 </span>
-                                <span className="text-[11px] text-stone-400">
-                                  Depth {activeSingleLocalResult.depth}
+                                <span className="font-mono text-[11px] text-stone-500">
+                                  d{sfEvaluation.depth}
                                 </span>
                               </div>
-                              {activeSingleLocalResult.bestMoveSan && (
-                                <button
-                                  type="button"
-                                  onClick={() =>
-                                    playUciMoveIfValid(
-                                      activeSingleLocalResult.bestMove,
-                                    )
-                                  }
-                                  className="rounded bg-[#302e2b] px-2 py-0.5 font-mono text-[11px] font-semibold text-stone-100 transition hover:bg-[#3d3a36]"
-                                >
-                                  Best: {activeSingleLocalResult.bestMoveSan}
-                                </button>
-                              )}
+                              <div className="flex items-center gap-2">
+                                <span className="font-mono text-xs font-bold text-[#a3d160]">
+                                  {formatEvaluationScore(sfEvaluation)}
+                                </span>
+                                {sfEvaluation.bestMove && (
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      playUciMoveIfValid(sfEvaluation.bestMove)
+                                    }
+                                    className="rounded bg-[#34312d] px-2 py-0.5 font-mono text-xs font-semibold text-stone-100 hover:bg-[#423f3a]"
+                                  >
+                                    {uciLineToSan(
+                                      fen,
+                                      [sfEvaluation.bestMove],
+                                      1,
+                                    )}
+                                  </button>
+                                )}
+                              </div>
                             </div>
-                            {activeSingleLocalResult.insights.map((note) => (
-                              <p
-                                key={note}
-                                className="text-[11px] text-stone-400"
-                              >
-                                • {note}
-                              </p>
-                            ))}
-                          </div>
-                        ) : (
-                          <span className="text-[11px] text-stone-400">
-                            Đang tính toán trên Web Worker...
-                          </span>
-                        ))}
 
-                      {/* Side-by-side Compare mode: Stockfish 19 vs PeSTO vs js-chess-engine */}
-                      {engineMode === 'compare' && (
-                        <div className="flex flex-col gap-1">
-                          <div className="flex items-center justify-between gap-2 rounded bg-[#262421] px-2 py-1.5">
-                            <div className="flex items-center gap-1.5">
-                              <span className="h-2.5 w-2.5 rounded-full bg-green-600" />
-                              <span className="text-[11px] font-semibold text-stone-200">
-                                Stockfish 19
-                              </span>
-                              <span className="font-mono text-[10px] text-stone-500">
-                                d{sfEvaluation.depth}
-                              </span>
+                            <div className="flex items-center justify-between gap-2 rounded-lg bg-[#2a2824] px-3 py-2">
+                              <div className="flex items-center gap-2">
+                                <span className="h-3 w-3 rounded-full bg-blue-500" />
+                                <span className="text-xs font-semibold text-stone-100">
+                                  PeSTO Cổ điển
+                                </span>
+                                <span className="font-mono text-[11px] text-stone-500">
+                                  d3
+                                </span>
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <span className="font-mono text-xs font-bold text-sky-400">
+                                  {classicalResult
+                                    ? formatEvaluationScore(classicalResult)
+                                    : '...'}
+                                </span>
+                                {classicalResult?.bestMoveSan && (
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      playUciMoveIfValid(
+                                        classicalResult.bestMove,
+                                      )
+                                    }
+                                    className="rounded bg-[#34312d] px-2 py-0.5 font-mono text-xs font-semibold text-stone-100 hover:bg-[#423f3a]"
+                                  >
+                                    {classicalResult.bestMoveSan}
+                                  </button>
+                                )}
+                              </div>
                             </div>
-                            <div className="flex items-center gap-1.5">
-                              <span className="font-mono text-[11px] font-bold text-[#a3d160]">
-                                {formatEvaluationScore(sfEvaluation)}
-                              </span>
-                              {sfEvaluation.bestMove && (
-                                <button
-                                  type="button"
-                                  onClick={() =>
-                                    playUciMoveIfValid(sfEvaluation.bestMove)
-                                  }
-                                  className="rounded bg-[#302e2b] px-1.5 py-0.5 font-mono text-[11px] text-stone-100 hover:bg-[#3d3a36]"
-                                >
-                                  {uciLineToSan(fen, [sfEvaluation.bestMove], 1)}
-                                </button>
-                              )}
-                            </div>
-                          </div>
 
-                          <div className="flex items-center justify-between gap-2 rounded bg-[#262421] px-2 py-1.5">
-                            <div className="flex items-center gap-1.5">
-                              <span className="h-2.5 w-2.5 rounded-full bg-blue-500" />
-                              <span className="text-[11px] font-semibold text-stone-200">
-                                PeSTO Cổ điển
-                              </span>
-                              <span className="font-mono text-[10px] text-stone-500">
-                                d3
-                              </span>
-                            </div>
-                            <div className="flex items-center gap-1.5">
-                              <span className="font-mono text-[11px] font-bold text-sky-400">
-                                {classicalResult
-                                  ? formatEvaluationScore(classicalResult)
-                                  : '...'}
-                              </span>
-                              {classicalResult?.bestMoveSan && (
-                                <button
-                                  type="button"
-                                  onClick={() =>
-                                    playUciMoveIfValid(classicalResult.bestMove)
-                                  }
-                                  className="rounded bg-[#302e2b] px-1.5 py-0.5 font-mono text-[11px] text-stone-100 hover:bg-[#3d3a36]"
-                                >
-                                  {classicalResult.bestMoveSan}
-                                </button>
-                              )}
+                            <div className="flex items-center justify-between gap-2 rounded-lg bg-[#2a2824] px-3 py-2">
+                              <div className="flex items-center gap-2">
+                                <span className="h-3 w-3 rounded-full bg-purple-500" />
+                                <span className="text-xs font-semibold text-stone-100">
+                                  js-chess-engine
+                                </span>
+                                <span className="font-mono text-[11px] text-stone-500">
+                                  MIT
+                                </span>
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <span className="font-mono text-xs font-bold text-purple-400">
+                                  {jsChessResult
+                                    ? formatEvaluationScore(jsChessResult)
+                                    : '...'}
+                                </span>
+                                {jsChessResult?.bestMoveSan && (
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      playUciMoveIfValid(jsChessResult.bestMove)
+                                    }
+                                    className="rounded bg-[#34312d] px-2 py-0.5 font-mono text-xs font-semibold text-stone-100 hover:bg-[#423f3a]"
+                                  >
+                                    {jsChessResult.bestMoveSan}
+                                  </button>
+                                )}
+                              </div>
                             </div>
                           </div>
-
-                          <div className="flex items-center justify-between gap-2 rounded bg-[#262421] px-2 py-1.5">
-                            <div className="flex items-center gap-1.5">
-                              <span className="h-2.5 w-2.5 rounded-full bg-purple-500" />
-                              <span className="text-[11px] font-semibold text-stone-200">
-                                js-chess-engine
-                              </span>
-                              <span className="font-mono text-[10px] text-stone-500">
-                                MIT
-                              </span>
-                            </div>
-                            <div className="flex items-center gap-1.5">
-                              <span className="font-mono text-[11px] font-bold text-purple-400">
-                                {jsChessResult
-                                  ? formatEvaluationScore(jsChessResult)
-                                  : '...'}
-                              </span>
-                              {jsChessResult?.bestMoveSan && (
-                                <button
-                                  type="button"
-                                  onClick={() =>
-                                    playUciMoveIfValid(jsChessResult.bestMove)
-                                  }
-                                  className="rounded bg-[#302e2b] px-1.5 py-0.5 font-mono text-[11px] text-stone-100 hover:bg-[#3d3a36]"
-                                >
-                                  {jsChessResult.bestMoveSan}
-                                </button>
-                              )}
-                            </div>
-                          </div>
-                        </div>
-                      )}
-                    </>
-                  )}
-                </div>
-              </>
-            )}
-          </div>
-
-          {/* Reviewing banner if not at latest ply */}
-          {isReviewingEarlier && (
-            <div className="flex items-center justify-between border-b border-amber-500/20 bg-amber-500/10 px-4 py-1 text-[11px] text-amber-300">
-              <span>
-                Đang xem lại nước {viewIndex}/{moves.length}
-              </span>
-              <button
-                type="button"
-                onClick={() => jumpToPly(moves.length)}
-                className="font-semibold underline hover:text-amber-200"
-              >
-                Tới nước cuối
-              </button>
+                        )}
+                      </>
+                    )}
+                  </div>
+                </>
+              )}
             </div>
           )}
 
-          {/* Move List Table */}
-          <div className="min-h-36 flex-1 overflow-y-auto px-2 py-2">
-            {moveRows.length === 0 ? (
-              <div className="flex h-full flex-col items-center justify-center gap-2 py-8 text-center text-stone-500">
-                <p className="text-sm font-medium text-stone-400">
-                  Sẵn sàng phân tích
-                </p>
-                <p className="max-w-[260px] text-xs">
-                  Tìm tài khoản Lichess / Chess.com, dán PGN hoặc kéo thả quân cờ để bắt đầu.
-                </p>
-                <div className="mt-2 flex flex-wrap justify-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setImportModalTab('online')}
-                    className="rounded-md bg-[#81b64c] px-2.5 py-1.5 text-xs font-bold text-[#161512] transition hover:bg-[#95c75d]"
-                  >
-                    🔍 Lichess / Chess.com
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setImportModalTab('pgn')}
-                    className="rounded-md bg-[#302e2b] px-2.5 py-1.5 text-xs font-medium text-stone-200 transition hover:bg-[#3d3a36]"
-                  >
-                    Dán PGN
-                  </button>
-                </div>
-              </div>
-            ) : (
-              <div className="font-mono text-sm">
-                {moveRows.map((row, idx) => {
-                  const whiteReview = row.white
-                    ? reviewMoveMap.get(row.white.ply)
-                    : undefined
-                  const blackReview = row.black
-                    ? reviewMoveMap.get(row.black.ply)
-                    : undefined
-
-                  return (
-                    <div
-                      key={`${row.moveNumber}-${idx}`}
-                      className={[
-                        'grid grid-cols-[40px_1fr_1fr] items-center rounded px-1.5 py-0.5',
-                        idx % 2 === 1 ? 'bg-white/[0.025]' : '',
-                      ].join(' ')}
-                    >
-                      <span className="text-xs text-stone-500">
-                        {row.moveNumber}.
-                      </span>
-
-                      {row.white ? (
-                        <button
-                          ref={
-                            viewIndex === row.white.ply ? activeMoveRef : null
-                          }
-                          type="button"
-                          onClick={() => jumpToPly(row.white!.ply)}
-                          className={[
-                            'flex items-center justify-between gap-1 rounded px-2 py-1 text-left font-medium transition',
-                            viewIndex === row.white.ply
-                              ? 'bg-[#81b64c]/30 text-[#d4f2ab]'
-                              : 'text-stone-200 hover:bg-white/10',
-                          ].join(' ')}
-                        >
-                          <span>{row.white.san}</span>
-                          {whiteReview &&
-                            whiteReview.classification !== 'good' && (
-                              <span
-                                title={
-                                  CLASSIFICATION_META[
-                                    whiteReview.classification
-                                  ].label
-                                }
-                                style={{
-                                  color:
-                                    CLASSIFICATION_META[
-                                      whiteReview.classification
-                                    ].color,
-                                }}
-                                className="text-[11px] font-bold"
-                              >
-                                {
-                                  CLASSIFICATION_META[
-                                    whiteReview.classification
-                                  ].symbol
-                                }
-                              </span>
-                            )}
-                        </button>
-                      ) : (
-                        <span className="px-2 py-1 text-stone-600">...</span>
-                      )}
-
-                      {row.black ? (
-                        <button
-                          ref={
-                            viewIndex === row.black.ply ? activeMoveRef : null
-                          }
-                          type="button"
-                          onClick={() => jumpToPly(row.black!.ply)}
-                          className={[
-                            'flex items-center justify-between gap-1 rounded px-2 py-1 text-left font-medium transition',
-                            viewIndex === row.black.ply
-                              ? 'bg-[#81b64c]/30 text-[#d4f2ab]'
-                              : 'text-stone-300 hover:bg-white/10',
-                          ].join(' ')}
-                        >
-                          <span>{row.black.san}</span>
-                          {blackReview &&
-                            blackReview.classification !== 'good' && (
-                              <span
-                                title={
-                                  CLASSIFICATION_META[
-                                    blackReview.classification
-                                  ].label
-                                }
-                                style={{
-                                  color:
-                                    CLASSIFICATION_META[
-                                      blackReview.classification
-                                    ].color,
-                                }}
-                                className="text-[11px] font-bold"
-                              >
-                                {
-                                  CLASSIFICATION_META[
-                                    blackReview.classification
-                                  ].symbol
-                                }
-                              </span>
-                            )}
-                        </button>
-                      ) : (
-                        <span />
-                      )}
-                    </div>
-                  )
-                })}
-              </div>
-            )}
-          </div>
-
-          {/* Replay Navigation Bar */}
-          <div className="grid grid-cols-4 gap-1 border-t border-white/5 bg-[#1e1c1a] px-3 py-2">
+          {/* Large, Easy-to-Click Replay Navigation Bar */}
+          <div className="grid grid-cols-4 gap-1.5 border-t border-white/[0.07] bg-[#1e1c1a] px-3.5 py-2.5">
             <button
               type="button"
               onClick={() => jumpToPly(0)}
               disabled={viewIndex === 0}
               title="Về đầu ván (Home)"
-              className="rounded-md bg-[#2c2a27] py-1.5 text-xs font-bold text-stone-200 transition hover:bg-[#3d3a36] disabled:cursor-not-allowed disabled:opacity-35"
+              aria-label="Về đầu ván"
+              className="rounded-lg bg-[#2d2b27] py-2 text-sm font-bold text-stone-200 transition hover:bg-[#3d3a36] disabled:opacity-35"
             >
-              |&lt;
+              ⏮
             </button>
             <button
               type="button"
               onClick={() => jumpToPly(viewIndex - 1)}
               disabled={viewIndex === 0}
               title="Nước trước (←)"
-              className="rounded-md bg-[#2c2a27] py-1.5 text-xs font-bold text-stone-200 transition hover:bg-[#3d3a36] disabled:cursor-not-allowed disabled:opacity-35"
+              aria-label="Nước trước"
+              className="rounded-lg bg-[#2d2b27] py-2 text-sm font-bold text-stone-200 transition hover:bg-[#3d3a36] disabled:opacity-35"
             >
-              &lt;
+              ◀
             </button>
             <button
               type="button"
               onClick={() => jumpToPly(viewIndex + 1)}
               disabled={viewIndex >= moves.length}
               title="Nước sau (→)"
-              className="rounded-md bg-[#2c2a27] py-1.5 text-xs font-bold text-stone-200 transition hover:bg-[#3d3a36] disabled:cursor-not-allowed disabled:opacity-35"
+              aria-label="Nước sau"
+              className="rounded-lg bg-[#2d2b27] py-2 text-sm font-bold text-stone-200 transition hover:bg-[#3d3a36] disabled:opacity-35"
             >
-              &gt;
+              ▶
             </button>
             <button
               type="button"
               onClick={() => jumpToPly(moves.length)}
               disabled={viewIndex >= moves.length}
               title="Về nước cuối (End)"
-              className="rounded-md bg-[#2c2a27] py-1.5 text-xs font-bold text-stone-200 transition hover:bg-[#3d3a36] disabled:cursor-not-allowed disabled:opacity-35"
+              aria-label="Về nước cuối"
+              className="rounded-lg bg-[#2d2b27] py-2 text-sm font-bold text-stone-200 transition hover:bg-[#3d3a36] disabled:opacity-35"
             >
-              &gt;|
+              ⏭
             </button>
           </div>
 
-          {/* Action Controls */}
-          <div className="border-t border-white/5 bg-[#211f1c] p-3">
+          {/* Primary Action Controls & Clean Copy Row */}
+          <div className="border-t border-white/[0.07] bg-[#22201d] p-3.5">
             <div className="grid grid-cols-3 gap-2">
               <button
                 type="button"
                 onClick={() =>
                   setOrientation((prev) => (prev === 'w' ? 'b' : 'w'))
                 }
-                className="rounded-lg bg-[#302e2b] px-3 py-2 text-xs font-semibold text-stone-200 transition hover:bg-[#3d3a36]"
+                className="rounded-lg bg-[#32302c] px-3 py-2.5 text-xs font-semibold text-stone-100 transition hover:bg-[#403d38]"
               >
                 ⇅ Xoay bàn
               </button>
@@ -1746,48 +2068,43 @@ export function App() {
                 type="button"
                 onClick={handleUndo}
                 disabled={viewIndex === 0}
-                className="rounded-lg bg-[#302e2b] px-3 py-2 text-xs font-semibold text-stone-200 transition hover:bg-[#3d3a36] disabled:cursor-not-allowed disabled:opacity-40"
+                className="rounded-lg bg-[#32302c] px-3 py-2.5 text-xs font-semibold text-stone-100 transition hover:bg-[#403d38] disabled:opacity-35"
               >
                 ↶ Hoàn tác
               </button>
               <button
                 type="button"
                 onClick={handleReset}
-                className="rounded-lg bg-[#81b64c] px-3 py-2 text-xs font-bold text-[#161512] transition hover:bg-[#95c75d]"
+                className="rounded-lg bg-[#81b64c] px-3 py-2.5 text-xs font-bold text-[#161512] shadow-xs transition hover:bg-[#95c75d]"
               >
-                Ván mới
+                ↻ Ván mới
               </button>
             </div>
 
-            {/* Compact FEN & PGN Footer */}
-            <div className="mt-3 flex items-center justify-between gap-1.5 rounded-md bg-[#161512] px-2.5 py-2 ring-1 ring-white/5">
-              <code className="truncate text-[11px] text-stone-400" title={fen}>
-                {fen}
-              </code>
-              <div className="flex shrink-0 gap-1">
-                <button
-                  type="button"
-                  onClick={() => handleCopy('fen')}
-                  className="rounded bg-[#302e2b] px-2 py-1 text-[11px] font-medium text-stone-300 transition hover:bg-[#3d3a36]"
-                >
-                  {copiedType === 'fen' ? 'Đã copy' : 'FEN'}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleCopy('pgn')}
-                  disabled={moves.length === 0}
-                  className="rounded bg-[#302e2b] px-2 py-1 text-[11px] font-medium text-stone-300 transition hover:bg-[#3d3a36] disabled:cursor-not-allowed disabled:opacity-40"
-                >
-                  {copiedType === 'pgn' ? 'Đã copy' : 'PGN'}
-                </button>
-              </div>
+            <div className="mt-2.5 grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={() => handleCopy('fen')}
+                title={fen}
+                className="rounded-lg bg-[#1a1917] py-1.5 text-xs font-medium text-stone-400 ring-1 ring-white/[0.06] transition hover:bg-[#2c2a26] hover:text-stone-200"
+              >
+                {copiedType === 'fen' ? '✓ Đã sao chép FEN' : '📋 Sao chép FEN'}
+              </button>
+              <button
+                type="button"
+                onClick={() => handleCopy('pgn')}
+                disabled={moves.length === 0}
+                className="rounded-lg bg-[#1a1917] py-1.5 text-xs font-medium text-stone-400 ring-1 ring-white/[0.06] transition hover:bg-[#2c2a26] hover:text-stone-200 disabled:opacity-35"
+              >
+                {copiedType === 'pgn' ? '✓ Đã sao chép PGN' : '📋 Sao chép PGN'}
+              </button>
             </div>
           </div>
         </aside>
       </main>
 
       {/* Legal & Open-Source Attribution Footer (GPL-3.0 compliance) */}
-      <footer className="border-t border-white/5 bg-[#1b1917] px-4 py-3 text-center text-[11px] text-stone-500">
+      <footer className="border-t border-white/[0.06] bg-[#1e1c1a] px-4 py-3 text-center text-[11px] text-stone-500">
         JustChess • Giấy phép{' '}
         <span className="font-medium text-stone-400">GPL-3.0-or-later</span> •
         Engine: Stockfish 19 (GPL-3.0), js-chess-engine (MIT), chess.js

@@ -25,6 +25,14 @@ export interface BoardArrow {
   opacity?: number
 }
 
+export interface BoardMoveBadge {
+  square: Square
+  symbol: string
+  color: string
+  textColor: string
+  label: string
+}
+
 export interface PendingPromotion {
   from: Square
   to: Square
@@ -40,6 +48,7 @@ interface ChessBoardProps {
   selectedSquare: Square | null
   legalTargets: Set<Square>
   lastMove: LastMove | null
+  moveBadge?: BoardMoveBadge | null
   engineArrows?: BoardArrow[]
   checkedKingSquare: Square | null
   pendingPromotion: PendingPromotion | null
@@ -235,6 +244,7 @@ export function ChessBoard({
   selectedSquare,
   legalTargets,
   lastMove,
+  moveBadge = null,
   engineArrows = [],
   checkedKingSquare,
   pendingPromotion,
@@ -650,6 +660,20 @@ export function ChessBoard({
                       className="h-full w-full"
                     />
                   </div>
+                )}
+
+                {/* Chess.com-style On-Board Move Classification Badge */}
+                {moveBadge && moveBadge.square === square && (
+                  <span
+                    title={moveBadge.label}
+                    style={{
+                      backgroundColor: moveBadge.color,
+                      color: moveBadge.textColor,
+                    }}
+                    className="pointer-events-none absolute top-0.5 right-0.5 z-30 flex h-5 w-5 items-center justify-center rounded-full text-[10px] leading-none font-black shadow-[0_2px_6px_rgba(0,0,0,0.55)] ring-2 ring-[#161512] sm:h-6 sm:w-6 sm:text-[11px]"
+                  >
+                    {moveBadge.symbol}
+                  </span>
                 )}
               </button>
             )

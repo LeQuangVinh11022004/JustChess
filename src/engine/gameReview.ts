@@ -1,30 +1,44 @@
 import { Chess, DEFAULT_POSITION, type PieceSymbol, type Square } from 'chess.js'
 
 export type MoveClassification =
+  | 'brilliant'
+  | 'great'
   | 'best'
+  | 'excellent'
   | 'good'
+  | 'book'
   | 'inaccuracy'
   | 'mistake'
   | 'blunder'
 
 export interface ReviewMoveInfo {
   ply: number
+  moveNumber: number
   san: string
   uci: string
+  from: Square
+  to: Square
   color: 'w' | 'b'
   cp: number | null
   mate: number | null
   /** White's win probability after this move (0–100) */
   whiteWinPercent: number
   bestMoveBefore: string | null
+  bestMoveBeforeSan: string | null
   winLoss: number
   classification: MoveClassification
+  commentary: string
 }
 
 export interface SideReviewSummary {
   accuracy: number
+  estimatedRating: number
+  brilliant: number
+  great: number
   best: number
+  excellent: number
   good: number
+  book: number
   inaccuracy: number
   mistake: number
   blunder: number
@@ -45,40 +59,122 @@ export interface ReviewInputMove {
   promotion?: PieceSymbol
 }
 
+export const CLASSIFICATION_ORDER: MoveClassification[] = [
+  'brilliant',
+  'great',
+  'best',
+  'excellent',
+  'good',
+  'book',
+  'inaccuracy',
+  'mistake',
+  'blunder',
+]
+
 export const CLASSIFICATION_META: Record<
   MoveClassification,
-  { symbol: string; label: string; color: string; bg: string }
+  { symbol: string; label: string; color: string; bg: string; badgeText: string }
 > = {
+  brilliant: {
+    symbol: '!!',
+    label: 'Thiên tài (Brilliant)',
+    color: '#1baca6',
+    bg: 'rgba(27, 172, 166, 0.22)',
+    badgeText: '#ffffff',
+  },
+  great: {
+    symbol: '!',
+    label: 'Xuất sắc (Great)',
+    color: '#5c8bb0',
+    bg: 'rgba(92, 139, 176, 0.22)',
+    badgeText: '#ffffff',
+  },
   best: {
     symbol: '★',
-    label: 'Best move',
+    label: 'Tốt nhất (Best)',
     color: '#81b64c',
     bg: 'rgba(129, 182, 76, 0.2)',
+    badgeText: '#ffffff',
+  },
+  excellent: {
+    symbol: '✓',
+    label: 'Rất tốt (Excellent)',
+    color: '#96bc4b',
+    bg: 'rgba(150, 188, 75, 0.16)',
+    badgeText: '#ffffff',
   },
   good: {
     symbol: '✓',
-    label: 'Tốt',
-    color: '#96bc4b',
-    bg: 'rgba(150, 188, 75, 0.14)',
+    label: 'Tốt (Good)',
+    color: '#96af8b',
+    bg: 'rgba(150, 175, 139, 0.15)',
+    badgeText: '#ffffff',
+  },
+  book: {
+    symbol: '📖',
+    label: 'Sách khai cuộc (Book)',
+    color: '#a88865',
+    bg: 'rgba(168, 136, 101, 0.22)',
+    badgeText: '#ffffff',
   },
   inaccuracy: {
     symbol: '?!',
     label: 'Thiếu chính xác',
     color: '#f0c15c',
-    bg: 'rgba(240, 193, 92, 0.2)',
+    bg: 'rgba(240, 193, 92, 0.22)',
+    badgeText: '#161512',
   },
   mistake: {
     symbol: '?',
-    label: 'Mistake',
+    label: 'Sai lầm (Mistake)',
     color: '#e6912c',
-    bg: 'rgba(230, 145, 44, 0.22)',
+    bg: 'rgba(230, 145, 44, 0.24)',
+    badgeText: '#ffffff',
   },
   blunder: {
     symbol: '??',
-    label: 'Blunder',
-    color: '#e05347',
-    bg: 'rgba(224, 83, 71, 0.24)',
+    label: 'Nghiêm trọng (Blunder)',
+    color: '#ca3431',
+    bg: 'rgba(202, 52, 49, 0.26)',
+    badgeText: '#ffffff',
   },
+}
+
+const MATERIAL_VALUE: Record<PieceSymbol, number> = {
+  p: 1,
+  n: 3,
+  b: 3,
+  r: 5,
+  q: 9,
+  k: 0,
+}
+
+function getSideMaterial(chess: Chess, color: 'w' | 'b'): number {
+  let total = 0
+  for (const row of chess.board()) {
+    for (const cell of row) {
+      if (cell && cell.color === color) {
+        total += MATERIAL_VALUE[cell.type]
+      }
+    }
+  }
+  return total
+}
+
+function uciToSanSafe(fen: string, uci: string | null): string | null {
+  if (!uci || uci.length < 4) return null
+  try {
+    const temp = new Chess()
+    temp.load(fen)
+    const move = temp.move({
+      from: uci.slice(0, 2) as Square,
+      to: uci.slice(2, 4) as Square,
+      promotion: (uci[4] as PieceSymbol | undefined) ?? undefined,
+    })
+    return move.san
+  } catch {
+    return uci
+  }
 }
 
 export function evalToWhiteWinPercent(
@@ -93,17 +189,184 @@ export function evalToWhiteWinPercent(
   return Math.max(0, Math.min(100, 50 + 50 * winChance))
 }
 
-function classifyMove(
-  uci: string,
-  bestMoveBefore: string | null,
-  winLoss: number,
-): MoveClassification {
-  if (bestMoveBefore && uci === bestMoveBefore) return 'best'
-  if (winLoss <= 1.8) return 'best'
-  if (winLoss <= 5.5) return 'good'
-  if (winLoss <= 10.5) return 'inaccuracy'
-  if (winLoss <= 20) return 'mistake'
+export function classifyLiveMove(params: {
+  ply: number
+  isStandardStart: boolean
+  uci: string
+  san: string
+  color: 'w' | 'b'
+  fenBefore: string
+  before: { cp: number | null; mate: number | null; bestMove: string | null }
+  after: { cp: number | null; mate: number | null }
+  isCheckmate: boolean
+}): {
+  classification: MoveClassification
+  winLoss: number
+  bestMoveBeforeSan: string | null
+  commentary: string
+} {
+  const whiteWinBefore = evalToWhiteWinPercent(
+    params.before.cp,
+    params.before.mate,
+  )
+  const whiteWinAfter = evalToWhiteWinPercent(params.after.cp, params.after.mate)
+
+  const moverWinBefore =
+    params.color === 'w' ? whiteWinBefore : 100 - whiteWinBefore
+  const moverWinAfter =
+    params.color === 'w' ? whiteWinAfter : 100 - whiteWinAfter
+  const winLoss = Math.max(0, moverWinBefore - moverWinAfter)
+
+  const classification = classifyMove({
+    ply: params.ply,
+    isStandardStart: params.isStandardStart,
+    uci: params.uci,
+    san: params.san,
+    bestMoveBefore: params.before.bestMove,
+    winLoss,
+    moverWinBefore,
+    moverWinAfter,
+    isSacrifice: false,
+    isCheckmate: params.isCheckmate,
+    wasBlunderBefore: false,
+  })
+
+  const bestMoveBeforeSan = uciToSanSafe(
+    params.fenBefore,
+    params.before.bestMove,
+  )
+  const commentary = buildCoachCommentary({
+    san: params.san,
+    classification,
+    bestMoveBeforeSan,
+    winLoss,
+    isCheckmate: params.isCheckmate,
+    mateAfter: params.after.mate,
+  })
+
+  return { classification, winLoss, bestMoveBeforeSan, commentary }
+}
+
+function classifyMove(params: {
+  ply: number
+  isStandardStart: boolean
+  uci: string
+  san: string
+  bestMoveBefore: string | null
+  winLoss: number
+  moverWinBefore: number
+  moverWinAfter: number
+  isSacrifice: boolean
+  isCheckmate: boolean
+  wasBlunderBefore: boolean
+}): MoveClassification {
+  const {
+    ply,
+    isStandardStart,
+    uci,
+    bestMoveBefore,
+    winLoss,
+    moverWinBefore,
+    moverWinAfter,
+    isSacrifice,
+    isCheckmate,
+    wasBlunderBefore,
+  } = params
+
+  const isTopChoice = Boolean(bestMoveBefore && uci === bestMoveBefore)
+
+  if (isCheckmate) return 'best'
+
+  // Opening book heuristic for early balanced moves from standard start
+  if (
+    isStandardStart &&
+    ply <= 6 &&
+    winLoss <= 2.5 &&
+    moverWinAfter >= 42 &&
+    moverWinAfter <= 58
+  ) {
+    return 'book'
+  }
+
+  // Brilliant: best/near-best move that sacrifices material while keeping strong/winning position
+  if (
+    isSacrifice &&
+    (isTopChoice || winLoss <= 1.5) &&
+    moverWinAfter >= 55 &&
+    ply >= 6
+  ) {
+    return 'brilliant'
+  }
+
+  // Great: punishing an opponent's blunder or finding the sharp best move in a critical position
+  if (
+    isTopChoice &&
+    winLoss <= 1.2 &&
+    (wasBlunderBefore || (moverWinBefore >= 40 && moverWinAfter - moverWinBefore >= 4)) &&
+    ply >= 6
+  ) {
+    return 'great'
+  }
+
+  if (isTopChoice || winLoss <= 1.5) return 'best'
+  if (winLoss <= 3.5) return 'excellent'
+  if (winLoss <= 6.5) return 'good'
+  if (winLoss <= 12) return 'inaccuracy'
+  if (winLoss <= 22) return 'mistake'
   return 'blunder'
+}
+
+function buildCoachCommentary(params: {
+  san: string
+  classification: MoveClassification
+  bestMoveBeforeSan: string | null
+  winLoss: number
+  isCheckmate: boolean
+  mateAfter: number | null
+}): string {
+  const {
+    san,
+    classification,
+    bestMoveBeforeSan,
+    winLoss,
+    isCheckmate,
+    mateAfter,
+  } = params
+
+  if (isCheckmate) {
+    return `${san} là đòn chiếu hết kết liễu ván đấu!`
+  }
+
+  switch (classification) {
+    case 'brilliant':
+      return `${san}!! Một nước thí quân cực kỳ táo bạo nhưng hoàn toàn chính xác — giữ vững thế chủ động!`
+    case 'great':
+      return `${san}! Nước đi sắc bén tận dụng chính xác thời cơ trong tình huống then chốt.`
+    case 'best':
+      return mateAfter !== null
+        ? `${san} là nước đi tối ưu nhất, mở ra đòn chiếu hết cưỡng bức.`
+        : `${san} là lựa chọn tốt nhất theo tính toán của Stockfish.`
+    case 'excellent':
+      return `${san} là một nước đi rất chắc chắn, gần tương đương phương án mạnh nhất.`
+    case 'good':
+      return bestMoveBeforeSan && bestMoveBeforeSan !== san
+        ? `${san} là nước đi ổn, tuy nhiên ${bestMoveBeforeSan} sẽ tạo thêm một chút áp lực.`
+        : `${san} là một nước đi hợp lý và an toàn.`
+    case 'book':
+      return `${san} là nước khai cuộc chuẩn theo lý thuyết.`
+    case 'inaccuracy':
+      return bestMoveBeforeSan
+        ? `${san} hơi thiếu chính xác (-${Math.round(winLoss)}% cơ hội thắng). Nên cân nhắc ${bestMoveBeforeSan}.`
+        : `${san} hơi thiếu chính xác, làm giảm nhẹ lợi thế.`
+    case 'mistake':
+      return bestMoveBeforeSan
+        ? `${san} là một sai lầm (-${Math.round(winLoss)}% cơ hội thắng). Phương án tốt hơn nhiều là ${bestMoveBeforeSan}.`
+        : `${san} là một sai lầm làm đánh mất đáng kể ưu thế.`
+    case 'blunder':
+      return bestMoveBeforeSan
+        ? `${san} là sai lầm nghiêm trọng (-${Math.round(winLoss)}% cơ hội thắng)! Đáng lẽ nên đi ${bestMoveBeforeSan}.`
+        : `${san} là sai lầm nghiêm trọng làm xoay chuyển hoàn toàn cục diện ván đấu!`
+  }
 }
 
 function computeSideSummary(
@@ -113,8 +376,13 @@ function computeSideSummary(
   const sideMoves = moves.filter((m) => m.color === color)
   const summary: SideReviewSummary = {
     accuracy: 100,
+    estimatedRating: 1500,
+    brilliant: 0,
+    great: 0,
     best: 0,
+    excellent: 0,
     good: 0,
+    book: 0,
     inaccuracy: 0,
     mistake: 0,
     blunder: 0,
@@ -125,15 +393,29 @@ function computeSideSummary(
   let accSum = 0
   for (const m of sideMoves) {
     summary[m.classification] += 1
-    // Lichess-style per-move accuracy curve from win-percent loss
     const moveAcc = Math.max(
       0,
-      Math.min(100, 103.1668 * Math.exp(-0.04354 * Math.max(0, m.winLoss)) - 3.1669),
+      Math.min(
+        100,
+        103.1668 * Math.exp(-0.04354 * Math.max(0, m.winLoss)) - 3.1669,
+      ),
     )
     accSum += moveAcc
   }
 
-  summary.accuracy = Math.round((accSum / sideMoves.length) * 10) / 10
+  const accuracy = Math.round((accSum / sideMoves.length) * 10) / 10
+  summary.accuracy = accuracy
+
+  // Fun Chess.com-style estimated single-game performance Elo (400 – 2700)
+  const baseElo = 450 + Math.pow(accuracy / 100, 1.85) * 2150
+  const blunderPenalty = summary.blunder * 85 + summary.mistake * 30
+  const brilliantBonus = summary.brilliant * 60 + summary.great * 25
+  const estimated = Math.max(
+    400,
+    Math.min(2750, Math.round((baseElo - blunderPenalty + brilliantBonus) / 50) * 50),
+  )
+  summary.estimatedRating = estimated
+
   return summary
 }
 
@@ -246,8 +528,9 @@ function waitForReady(worker: Worker, signal: AbortSignal): Promise<void> {
 }
 
 /**
- * Loops through every ply in the game using a dedicated Stockfish 19 Worker,
- * builds the win-rate curve, and classifies each move (Best / Good / Inaccuracy / Mistake / Blunder).
+ * Chess.com-style Full Game Review using a dedicated Stockfish 19 Worker.
+ * Classifies every move (Brilliant / Great / Best / Excellent / Good / Book / Inaccuracy / Mistake / Blunder),
+ * generates Vietnamese coach commentary, accuracy %, estimated Elo, and win-rate data.
  */
 export async function runFullGameReview(
   startFen: string,
@@ -260,42 +543,91 @@ export async function runFullGameReview(
 ): Promise<GameReviewResult> {
   const depth = options.depth ?? 12
   const { signal, onProgress } = options
+  const isStandardStart = startFen === DEFAULT_POSITION
 
-  // Build FEN snapshots for ply 0 .. moves.length
   const chess = new Chess()
-  if (startFen !== DEFAULT_POSITION) {
+  if (!isStandardStart) {
     chess.load(startFen)
   }
+
+  const startMoveNum = Number.parseInt(startFen.split(' ')[5] ?? '1', 10) || 1
+  const startsBlack = startFen.split(' ')[1] === 'b'
 
   const snapshots: Array<{
     fen: string
     isCheckmate: boolean
     isDraw: boolean
     turn: 'w' | 'b'
+    whiteMat: number
+    blackMat: number
   }> = [
     {
       fen: chess.fen(),
       isCheckmate: chess.isCheckmate(),
       isDraw: chess.isDraw(),
       turn: chess.turn(),
+      whiteMat: getSideMaterial(chess, 'w'),
+      blackMat: getSideMaterial(chess, 'b'),
     },
   ]
 
-  const moveMeta: Array<{ uci: string; san: string; color: 'w' | 'b' }> = []
+  const moveMeta: Array<{
+    uci: string
+    from: Square
+    to: Square
+    san: string
+    color: 'w' | 'b'
+    moveNumber: number
+    isSacrifice: boolean
+  }> = []
 
-  for (const m of moves) {
+  for (let idx = 0; idx < moves.length; idx++) {
+    const m = moves[idx]
     const color = chess.turn()
-    chess.move({ from: m.from, to: m.to, promotion: m.promotion })
+    const myMatBefore = getSideMaterial(chess, color)
+    const oppColor = color === 'w' ? 'b' : 'w'
+    const oppMatBefore = getSideMaterial(chess, oppColor)
+
+    const executed = chess.move({
+      from: m.from,
+      to: m.to,
+      promotion: m.promotion,
+    })
+
+    // Detect tactical sacrifice: moved a non-pawn piece to a square attacked by opponent where opponent can capture for material gain
+    const oppReplies = chess.moves({ verbose: true })
+    const canCaptureMovedPiece = oppReplies.some(
+      (r) => r.to === executed.to && r.captured,
+    )
+    const pieceVal = MATERIAL_VALUE[executed.piece]
+    const capturedVal = executed.captured ? MATERIAL_VALUE[executed.captured] : 0
+    const myMatAfter = getSideMaterial(chess, color)
+    const oppMatAfter = getSideMaterial(chess, oppColor)
+    const netMatDiff = myMatAfter - oppMatAfter - (myMatBefore - oppMatBefore)
+    const isSacrifice =
+      pieceVal >= 3 && canCaptureMovedPiece && pieceVal > capturedVal + 1 && netMatDiff <= 0
+
+    const moveNumber = startsBlack
+      ? startMoveNum + Math.floor((idx + 1) / 2)
+      : startMoveNum + Math.floor(idx / 2)
+
     moveMeta.push({
       uci: `${m.from}${m.to}${m.promotion ?? ''}`,
+      from: m.from,
+      to: m.to,
       san: m.san,
       color,
+      moveNumber,
+      isSacrifice,
     })
+
     snapshots.push({
       fen: chess.fen(),
       isCheckmate: chess.isCheckmate(),
       isDraw: chess.isDraw(),
       turn: chess.turn(),
+      whiteMat: getSideMaterial(chess, 'w'),
+      blackMat: getSideMaterial(chess, 'b'),
     })
   }
 
@@ -337,6 +669,7 @@ export async function runFullGameReview(
       const before = evals[i]
       const after = evals[i + 1]
       const meta = moveMeta[i]
+      const snapAfter = snapshots[i + 1]
 
       const whiteWinBefore = evalToWhiteWinPercent(before.cp, before.mate)
       const whiteWinAfter = evalToWhiteWinPercent(after.cp, after.mate)
@@ -347,17 +680,55 @@ export async function runFullGameReview(
         meta.color === 'w' ? whiteWinAfter : 100 - whiteWinAfter
       const winLoss = Math.max(0, moverWinBefore - moverWinAfter)
 
+      const prevReviewed = i > 0 ? reviewedMoves[i - 1] : null
+      const wasBlunderBefore =
+        prevReviewed?.classification === 'blunder' ||
+        prevReviewed?.classification === 'mistake'
+
+      const classification = classifyMove({
+        ply: i + 1,
+        isStandardStart,
+        uci: meta.uci,
+        san: meta.san,
+        bestMoveBefore: before.bestMove,
+        winLoss,
+        moverWinBefore,
+        moverWinAfter,
+        isSacrifice: meta.isSacrifice,
+        isCheckmate: snapAfter.isCheckmate,
+        wasBlunderBefore,
+      })
+
+      const bestMoveBeforeSan = uciToSanSafe(
+        snapshots[i].fen,
+        before.bestMove,
+      )
+
+      const commentary = buildCoachCommentary({
+        san: meta.san,
+        classification,
+        bestMoveBeforeSan,
+        winLoss,
+        isCheckmate: snapAfter.isCheckmate,
+        mateAfter: after.mate,
+      })
+
       reviewedMoves.push({
         ply: i + 1,
+        moveNumber: meta.moveNumber,
         san: meta.san,
         uci: meta.uci,
+        from: meta.from,
+        to: meta.to,
         color: meta.color,
         cp: after.cp,
         mate: after.mate,
         whiteWinPercent: whiteWinAfter,
         bestMoveBefore: before.bestMove,
+        bestMoveBeforeSan,
         winLoss,
-        classification: classifyMove(meta.uci, before.bestMove, winLoss),
+        classification,
+        commentary,
       })
     }
 
