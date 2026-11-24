@@ -17,12 +17,11 @@ import { EvaluationBar } from './components/EvaluationBar'
 import { GameReviewPanel } from './components/GameReviewPanel'
 import { ImportModal, type ImportTab } from './components/ImportModal'
 import { PlayerBar } from './components/PlayerBar'
-import type { LocalEngineResult } from './engine/classicalEngine'
-import type {
-  ClassicalWorkerRequest,
-  ClassicalWorkerResponse,
-  WorkerEngineStyle,
-} from './engine/classicalWorker'
+import {
+  BOT_PRESETS,
+  getStockfishBotMove,
+  type BotPresetId,
+} from './engine/botService'
 import {
   CLASSIFICATION_META,
   classifyLiveMove,
@@ -38,6 +37,11 @@ import {
   fetchLichessCloudEval,
   type LichessCloudEvalResult,
 } from './engine/lichessCloudEval'
+import type {
+  MaiaInferenceResult,
+  MaiaWorkerRequest,
+  MaiaWorkerResponse,
+} from './engine/maiaWorker'
 import {
   formatEvaluationScore,
   INITIAL_EVALUATION,
@@ -50,17 +54,17 @@ import {
   type BoardThemeId,
 } from './utils/boardThemes'
 import { chessSounds } from './utils/chessSounds'
-import type { OnlineGameSummary } from './utils/onlineGamesApi'
+import {
+  fetchOnlinePlayerProfile,
+  type OnlineGameSummary,
+} from './utils/onlineGamesApi'
 
-type EngineMode =
-  | 'stockfish'
-  | 'cloud'
-  | 'jschess'
-  | 'classical'
-  | 'aggressive'
-  | 'compare'
+type EngineMode = 'stockfish' | 'maia' | 'cloud' | 'compare'
 
-type SidebarTab = 'game' | 'review' | 'engine'
+type SidebarTab = 'game' | 'bot' | 'review' | 'engine'
+
+const MAIA_ELO_LEVELS = [1100, 1300, 1500, 1700, 1900] as const
+type MaiaEloLevel = (typeof MAIA_ELO_LEVELS)[number]
 
 interface StoredMove {
   from: Square
@@ -77,14 +81,21 @@ interface VariationBranch {
   cursor: number
 }
 
-interface PlayerNames {
-  white: string
-  black: string
+interface PlayerInfo {
+  name: string
+  title?: string
+  rating?: number
+  fideRating?: number
 }
 
-const DEFAULT_PLAYERS: PlayerNames = {
-  white: 'Quân Trắng',
-  black: 'Quân Đen',
+interface PlayersState {
+  white: PlayerInfo
+  black: PlayerInfo
+}
+
+const DEFAULT_PLAYERS: PlayersState = {
+  white: { name: 'Quân Trắng' },
+  black: { name: 'Quân Đen' },
 }
 
 const ENGINE_DEPTH = 15
@@ -93,32 +104,22 @@ const ENGINE_MODES: Array<{ id: EngineMode; label: string; desc: string }> = [
   {
     id: 'stockfish',
     label: 'Stockfish 19',
-    desc: 'NNUE WASM Local • Depth 15 • Top 2 biến',
+    desc: '~3600+ Elo • NNUE WASM Local',
+  },
+  {
+    id: 'maia',
+    label: 'Maia Chess',
+    desc: 'Mô phỏng người thật 1100–1900',
   },
   {
     id: 'cloud',
     label: 'Lichess Cloud',
-    desc: 'Stockfish Cloud siêu sâu (depth 30–60+)',
-  },
-  {
-    id: 'jschess',
-    label: 'js-chess',
-    desc: 'Open-source JS Engine (MIT)',
-  },
-  {
-    id: 'classical',
-    label: 'PeSTO Cổ điển',
-    desc: 'Vị trí & cấu trúc quân',
-  },
-  {
-    id: 'aggressive',
-    label: 'Tấn công',
-    desc: 'Ưu tiên áp lực & chủ động',
+    desc: 'Stockfish Cloud depth 30–60+',
   },
   {
     id: 'compare',
-    label: 'So sánh 3 Engine',
-    desc: 'Stockfish + PeSTO + js-chess',
+    label: 'SF19 vs Maia',
+    desc: 'So sánh Máy tối ưu vs Người thật',
   },
 ]
 
@@ -256,7 +257,7 @@ export function App() {
   const [moves, setMoves] = useState<StoredMove[]>([])
   const [viewIndex, setViewIndex] = useState<number>(0)
   const [variation, setVariation] = useState<VariationBranch | null>(null)
-  const [players, setPlayers] = useState<PlayerNames>(DEFAULT_PLAYERS)
+  const [players, setPlayers] = useState<PlayersState>(DEFAULT_PLAYERS)
   const [gameMeta, setGameMeta] = useState<string | null>(null)
 
   const [selectedSquare, setSelectedSquare] = useState<Square | null>(null)
@@ -274,9 +275,18 @@ export function App() {
   const [showBestMoveArrow, setShowBestMoveArrow] = useState<boolean>(true)
   const [sfEvaluation, setSfEvaluation] =
     useState<EngineEvaluation>(INITIAL_EVALUATION)
-  const [workerResults, setWorkerResults] = useState<
-    Partial<Record<WorkerEngineStyle, { fen: string; result: LocalEngineResult }>>
-  >({})
+  // Maia-3 ONNX Human-like Engine state
+  const [maiaElo, setMaiaElo] = useState<MaiaEloLevel>(1500)
+  const [maiaStatus, setMaiaStatus] = useState<
+    'idle' | 'downloading' | 'loading' | 'ready' | 'error'
+  >('idle')
+  const [maiaProgress, setMaiaProgress] = useState<number>(0)
+  const [maiaError, setMaiaError] = useState<string | null>(null)
+  const [maiaState, setMaiaState] = useState<{
+    fen: string
+    elo: number
+    data: MaiaInferenceResult
+  } | null>(null)
   const [cloudState, setCloudState] = useState<{
     fen: string
     loading: boolean
@@ -289,12 +299,8 @@ export function App() {
     error: null,
   })
   const engineRef = useRef<StockfishService | null>(null)
-  const classicalWorkerRef = useRef<Worker | null>(null)
-  const classicalReqIdRef = useRef<Record<WorkerEngineStyle, number>>({
-    classical: 0,
-    aggressive: 0,
-    jschess: 0,
-  })
+  const maiaWorkerRef = useRef<Worker | null>(null)
+  const maiaReqIdRef = useRef<number>(0)
 
   // Live per-move review context (shows badge immediately on the piece you just moved!)
   const [liveMoveCtx, setLiveMoveCtx] = useState<{
@@ -320,6 +326,15 @@ export function App() {
     mate: null,
     bestMove: null,
   })
+
+  // Play vs Bot state
+  const [botActive, setBotActive] = useState<boolean>(false)
+  const [botPresetId, setBotPresetId] = useState<BotPresetId>('sf-1500')
+  const [playerSide, setPlayerSide] = useState<'w' | 'b'>('w')
+  const [botThinking, setBotThinking] = useState<boolean>(false)
+  const botAbortRef = useRef<AbortController | null>(null)
+  const botMaiaCallbackRef = useRef<((uci: string | null) => void) | null>(null)
+  const botMaiaReqIdRef = useRef<number | null>(null)
 
   // Full Game Review state (Chess.com-style Coach, Scorecard, Badges & Win-Rate Graph)
   const [sidebarTab, setSidebarTab] = useState<SidebarTab>('game')
@@ -443,7 +458,7 @@ export function App() {
       engineMode === 'compare' ||
       (liveMoveCtx !== null && liveMoveCtx.fenAfter === fen))
 
-  // Lifecycle: start Stockfish Worker & Classical PeSTO Web Worker once
+  // Lifecycle: start Stockfish 19 Worker & Maia-3 ONNX Worker once
   useEffect(() => {
     const service = new StockfishService()
     engineRef.current = service
@@ -457,29 +472,64 @@ export function App() {
       }
     })
 
-    const classicalWorker = new Worker(
-      new URL('./engine/classicalWorker.ts', import.meta.url),
+    const maiaWorker = new Worker(
+      new URL('./engine/maiaWorker.ts', import.meta.url),
       { type: 'module' },
     )
-    classicalWorker.onmessage = (
-      event: MessageEvent<ClassicalWorkerResponse>,
-    ) => {
-      const { id, fen: resFen, style, result } = event.data
-      if (id === classicalReqIdRef.current[style]) {
-        setWorkerResults((prev) => ({
-          ...prev,
-          [style]: { fen: resFen, result },
-        }))
+    maiaWorker.onmessage = (event: MessageEvent<MaiaWorkerResponse>) => {
+      const msg = event.data
+      if (msg.type === 'status') {
+        setMaiaStatus(msg.status)
+        if (msg.error) setMaiaError(msg.error)
+        else if (msg.status === 'ready') setMaiaError(null)
+      } else if (msg.type === 'progress') {
+        setMaiaProgress(msg.percent)
+      } else if (msg.type === 'result') {
+        if (
+          botMaiaReqIdRef.current !== null &&
+          msg.id === botMaiaReqIdRef.current
+        ) {
+          botMaiaReqIdRef.current = null
+          const cb = botMaiaCallbackRef.current
+          botMaiaCallbackRef.current = null
+          // Sample slightly among top human moves for natural variety, preferring top choice
+          const top = msg.data.topMoves
+          let chosen = msg.data.bestMove
+          if (top.length >= 2) {
+            const r = Math.random()
+            if (r > top[0].probability && r <= top[0].probability + top[1].probability) {
+              chosen = top[1].uci
+            }
+          }
+          cb?.(chosen)
+          return
+        }
+        if (msg.id === maiaReqIdRef.current) {
+          setMaiaState({ fen: msg.fen, elo: msg.elo, data: msg.data })
+        }
+      } else if (msg.type === 'error') {
+        if (
+          botMaiaReqIdRef.current !== null &&
+          msg.id === botMaiaReqIdRef.current
+        ) {
+          botMaiaReqIdRef.current = null
+          botMaiaCallbackRef.current?.(null)
+          botMaiaCallbackRef.current = null
+        }
+        setMaiaError(msg.message)
       }
     }
-    classicalWorkerRef.current = classicalWorker
+    const initMsg: MaiaWorkerRequest = { type: 'init' }
+    maiaWorker.postMessage(initMsg)
+    maiaWorkerRef.current = maiaWorker
 
     return () => {
       service.destroy()
       engineRef.current = null
-      classicalWorker.terminate()
-      classicalWorkerRef.current = null
+      maiaWorker.terminate()
+      maiaWorkerRef.current = null
       reviewAbortRef.current?.abort()
+      botAbortRef.current?.abort()
     }
   }, [])
 
@@ -539,62 +589,190 @@ export function App() {
     }
   }, [fen, engineEnabled, engineMode, isGameOver])
 
-  // Run Classical PeSTO / Aggressive / js-chess-engine asynchronously in Web Worker
+  // Run Maia-3 ONNX inference in Web Worker when model is ready and Maia/Compare is active
   useEffect(() => {
-    const worker = classicalWorkerRef.current
-    if (!worker || !engineEnabled || isGameOver) return
-
-    const stylesToRun: WorkerEngineStyle[] =
-      engineMode === 'classical'
-        ? ['classical']
-        : engineMode === 'aggressive'
-          ? ['aggressive']
-          : engineMode === 'jschess'
-            ? ['jschess']
-            : engineMode === 'compare'
-              ? ['classical', 'jschess']
-              : []
-
-    if (stylesToRun.length === 0) return
+    const worker = maiaWorkerRef.current
+    if (
+      !worker ||
+      !engineEnabled ||
+      isGameOver ||
+      maiaStatus !== 'ready' ||
+      (engineMode !== 'maia' && engineMode !== 'compare')
+    ) {
+      return
+    }
 
     const timer = window.setTimeout(() => {
-      for (const style of stylesToRun) {
-        const nextId = classicalReqIdRef.current[style] + 1
-        classicalReqIdRef.current[style] = nextId
-        const payload: ClassicalWorkerRequest = {
-          id: nextId,
-          fen,
-          style,
-          depth: 3,
-        }
-        worker.postMessage(payload)
+      const nextId = maiaReqIdRef.current + 1
+      maiaReqIdRef.current = nextId
+      const req: MaiaWorkerRequest = {
+        type: 'analyze',
+        id: nextId,
+        fen,
+        elo: maiaElo,
       }
-    }, 45)
+      worker.postMessage(req)
+    }, 55)
 
     return () => window.clearTimeout(timer)
-  }, [fen, engineEnabled, engineMode, isGameOver])
+  }, [fen, engineEnabled, engineMode, isGameOver, maiaStatus, maiaElo])
 
-  const classicalResult: LocalEngineResult | null =
-    workerResults.classical?.fen === fen ? workerResults.classical.result : null
-  const aggressiveResult: LocalEngineResult | null =
-    workerResults.aggressive?.fen === fen
-      ? workerResults.aggressive.result
+  const activeBotPreset =
+    BOT_PRESETS.find((b) => b.id === botPresetId) ?? BOT_PRESETS[0]
+  const botColor: 'w' | 'b' = playerSide === 'w' ? 'b' : 'w'
+  const isBotsTurn =
+    botActive &&
+    !isGameOver &&
+    !variation &&
+    viewIndex === moves.length &&
+    turn === botColor
+
+  // Automatic Bot Move Loop
+  useEffect(() => {
+    if (!isBotsTurn) return
+
+    const controller = new AbortController()
+    botAbortRef.current = controller
+
+    const timer = window.setTimeout(() => {
+      setBotThinking(true)
+
+      const finishBotMove = (uci: string | null) => {
+        if (controller.signal.aborted) return
+        setBotThinking(false)
+        const parsed = parseUciMove(uci)
+        if (!parsed) return
+
+        const nextGame = buildGameAtPly(startFen, moves, moves.length)
+        const executed = nextGame.move({
+          from: parsed.from,
+          to: parsed.to,
+          promotion: parsed.promotion,
+        })
+        if (soundEnabled) playSoundForMove(executed, nextGame)
+
+        const updated: StoredMove[] = [
+          ...moves,
+          {
+            from: executed.from,
+            to: executed.to,
+            san: executed.san,
+            promotion: executed.promotion,
+          },
+        ]
+        setMoves(updated)
+        setViewIndex(updated.length)
+        setSelectedSquare(null)
+        setPendingPromotion(null)
+      }
+
+      if (activeBotPreset.engine === 'maia') {
+        if (maiaStatus !== 'ready' || !maiaWorkerRef.current) {
+          setBotThinking(false)
+          return
+        }
+        const reqId = Date.now()
+        botMaiaReqIdRef.current = reqId
+        botMaiaCallbackRef.current = finishBotMove
+        const req: MaiaWorkerRequest = {
+          type: 'analyze',
+          id: reqId,
+          fen,
+          elo: activeBotPreset.maiaElo ?? 1500,
+        }
+        maiaWorkerRef.current.postMessage(req)
+      } else {
+        void getStockfishBotMove(
+          fen,
+          activeBotPreset.skillLevel ?? 6,
+          activeBotPreset.depth ?? 6,
+          controller.signal,
+        )
+          .then(finishBotMove)
+          .catch(() => {
+            if (!controller.signal.aborted) setBotThinking(false)
+          })
+      }
+    }, 340)
+
+    return () => {
+      window.clearTimeout(timer)
+      controller.abort()
+      botMaiaReqIdRef.current = null
+      botMaiaCallbackRef.current = null
+      setBotThinking(false)
+    }
+  }, [
+    isBotsTurn,
+    fen,
+    startFen,
+    moves,
+    activeBotPreset,
+    maiaStatus,
+    soundEnabled,
+  ])
+
+  const startBotMatch = (
+    presetId: BotPresetId = botPresetId,
+    side: 'w' | 'b' = playerSide,
+  ) => {
+    const preset = BOT_PRESETS.find((b) => b.id === presetId) ?? BOT_PRESETS[0]
+    if (preset.engine === 'maia' && maiaStatus !== 'ready') {
+      if (maiaStatus === 'idle' || maiaStatus === 'error') {
+        triggerMaiaDownload()
+      }
+      return
+    }
+
+    botAbortRef.current?.abort()
+    clearReview()
+    setVariation(null)
+    setLiveMoveCtx(null)
+    setStartFen(DEFAULT_POSITION)
+    setMoves([])
+    setViewIndex(0)
+    setOrientation(side)
+    setBotPresetId(presetId)
+    setPlayerSide(side)
+    setBotActive(true)
+    setSidebarTab('game')
+
+    const botInfo: PlayerInfo = {
+      name: `🤖 ${preset.name}`,
+      title: 'BOT',
+      rating: Number.parseInt(preset.eloLabel.replace(/\D/g, ''), 10) || undefined,
+    }
+    const humanInfo: PlayerInfo = { name: 'Bạn' }
+    setPlayers(
+      side === 'w'
+        ? { white: humanInfo, black: botInfo }
+        : { white: botInfo, black: humanInfo },
+    )
+    setGameMeta(`Đấu với ${preset.name} (${preset.eloLabel})`)
+    setSelectedSquare(null)
+    setPendingPromotion(null)
+  }
+
+  const stopBotMatch = () => {
+    botAbortRef.current?.abort()
+    setBotActive(false)
+    setBotThinking(false)
+  }
+
+  const triggerMaiaDownload = () => {
+    setMaiaError(null)
+    const req: MaiaWorkerRequest = { type: 'download' }
+    maiaWorkerRef.current?.postMessage(req)
+  }
+
+  const activeMaiaResult: MaiaInferenceResult | null =
+    maiaState && maiaState.fen === fen && maiaState.elo === maiaElo
+      ? maiaState.data
       : null
-  const jsChessResult: LocalEngineResult | null =
-    workerResults.jschess?.fen === fen ? workerResults.jschess.result : null
   const activeCloudResult =
     cloudState.fen === fen ? cloudState.result : null
   const isCloudLoading = cloudState.fen === fen && cloudState.loading
   const cloudError = cloudState.fen === fen ? cloudState.error : null
-
-  const activeSingleLocalResult: LocalEngineResult | null =
-    engineMode === 'classical'
-      ? classicalResult
-      : engineMode === 'aggressive'
-        ? aggressiveResult
-        : engineMode === 'jschess'
-          ? jsChessResult
-          : null
 
   // Choose primary evaluation for EvaluationBar based on active engine mode
   const activeEvalForBar: EngineEvaluation = (() => {
@@ -630,15 +808,18 @@ export function App() {
         isReady: true,
       }
     }
-    if (activeSingleLocalResult) {
+    if (engineMode === 'maia' && activeMaiaResult) {
+      // Convert Maia White win% (0–100) to approximate centipawn scale for EvaluationBar
+      const p = Math.max(0.01, Math.min(0.99, activeMaiaResult.whiteWinPercent / 100))
+      const approxCp = Math.round(Math.log(p / (1 - p)) / 0.00368208)
       return {
         ...INITIAL_EVALUATION,
-        cp: activeSingleLocalResult.cp,
-        mate: activeSingleLocalResult.mate,
-        depth: activeSingleLocalResult.depth,
-        targetDepth: activeSingleLocalResult.depth,
-        bestMove: activeSingleLocalResult.bestMove,
-        pv: activeSingleLocalResult.pv,
+        cp: approxCp,
+        mate: null,
+        depth: 1,
+        targetDepth: 1,
+        bestMove: activeMaiaResult.bestMove,
+        pv: activeMaiaResult.bestMove ? [activeMaiaResult.bestMove] : [],
         isSearching: false,
         isReady: true,
       }
@@ -686,14 +867,8 @@ export function App() {
     if (engineMode === 'cloud') {
       pushUnique(activeCloudResult?.lines[0]?.moves[0] ?? null, '#06b6d4', 0.84) // Cyan: Lichess Cloud
     }
-    if (engineMode === 'classical' || engineMode === 'compare') {
-      pushUnique(classicalResult?.bestMove ?? null, '#3b82f6', 0.78) // Blue: PeSTO
-    }
-    if (engineMode === 'jschess' || engineMode === 'compare') {
-      pushUnique(jsChessResult?.bestMove ?? null, '#a855f7', 0.78) // Purple: js-chess-engine
-    }
-    if (engineMode === 'aggressive') {
-      pushUnique(aggressiveResult?.bestMove ?? null, '#f97316', 0.82) // Orange: Aggressive
+    if (engineMode === 'maia' || engineMode === 'compare') {
+      pushUnique(activeMaiaResult?.bestMove ?? null, '#c026d3', 0.8) // Fuchsia/Purple: Maia Human Move
     }
 
     return arrows
@@ -1033,7 +1208,7 @@ export function App() {
   }
 
   const tryMove = (from: Square, to: Square) => {
-    if (isGameOver) return
+    if (isGameOver || isBotsTurn || botThinking) return
 
     const candidateMoves = displayGame
       .moves({ square: from, verbose: true })
@@ -1054,7 +1229,7 @@ export function App() {
   }
 
   const handleSquareSelect = (square: Square) => {
-    if (isGameOver || pendingPromotion) return
+    if (isGameOver || pendingPromotion || isBotsTurn || botThinking) return
 
     if (selectedSquare && legalTargets.has(square)) {
       tryMove(selectedSquare, square)
@@ -1104,6 +1279,9 @@ export function App() {
   }
 
   const handleReset = () => {
+    botAbortRef.current?.abort()
+    setBotActive(false)
+    setBotThinking(false)
     clearReview()
     setVariation(null)
     setLiveMoveCtx(null)
@@ -1117,6 +1295,9 @@ export function App() {
   }
 
   const handleImportFen = (loadedFen: string) => {
+    botAbortRef.current?.abort()
+    setBotActive(false)
+    setBotThinking(false)
     clearReview()
     setVariation(null)
     setLiveMoveCtx(null)
@@ -1136,10 +1317,17 @@ export function App() {
       orientation?: 'w' | 'b'
       fallbackWhite?: string
       fallbackBlack?: string
+      whiteTitle?: string
+      blackTitle?: string
+      whiteRating?: number
+      blackRating?: number
       metaOverride?: string
       explicitTimeControl?: string
     },
   ) => {
+    botAbortRef.current?.abort()
+    setBotActive(false)
+    setBotThinking(false)
     clearReview()
     const parsed = new Chess()
     parsed.loadPgn(pgnText)
@@ -1164,15 +1352,32 @@ export function App() {
     if (opts?.orientation) {
       setOrientation(opts.orientation)
     }
+    const parseElo = (raw?: string): number | undefined => {
+      if (!raw) return undefined
+      const n = Number.parseInt(raw, 10)
+      return Number.isNaN(n) || n <= 0 ? undefined : n
+    }
+
+    const whiteName =
+      headers.White && headers.White !== '?'
+        ? headers.White
+        : opts?.fallbackWhite ?? DEFAULT_PLAYERS.white.name
+    const blackName =
+      headers.Black && headers.Black !== '?'
+        ? headers.Black
+        : opts?.fallbackBlack ?? DEFAULT_PLAYERS.black.name
+
     setPlayers({
-      white:
-        headers.White && headers.White !== '?'
-          ? headers.White
-          : opts?.fallbackWhite ?? DEFAULT_PLAYERS.white,
-      black:
-        headers.Black && headers.Black !== '?'
-          ? headers.Black
-          : opts?.fallbackBlack ?? DEFAULT_PLAYERS.black,
+      white: {
+        name: whiteName,
+        title: headers.WhiteTitle || opts?.whiteTitle,
+        rating: parseElo(headers.WhiteElo) ?? opts?.whiteRating,
+      },
+      black: {
+        name: blackName,
+        title: headers.BlackTitle || opts?.blackTitle,
+        rating: parseElo(headers.BlackElo) ?? opts?.blackRating,
+      },
     })
 
     if (opts?.metaOverride) {
@@ -1207,8 +1412,37 @@ export function App() {
       orientation: game.userColor,
       fallbackWhite: game.whiteName,
       fallbackBlack: game.blackName,
+      whiteTitle: game.whiteTitle,
+      blackTitle: game.blackTitle,
+      whiteRating: game.whiteRating,
+      blackRating: game.blackRating,
       metaOverride: meta,
       explicitTimeControl: game.timeControl,
+    })
+
+    // Enrich both players asynchronously with official Title & FIDE rating from platform profile API
+    void Promise.all([
+      fetchOnlinePlayerProfile(game.platform, game.whiteName),
+      fetchOnlinePlayerProfile(game.platform, game.blackName),
+    ]).then(([whiteProfile, blackProfile]) => {
+      setPlayers((prev) => ({
+        white:
+          prev.white.name.toLowerCase() === game.whiteName.toLowerCase()
+            ? {
+                ...prev.white,
+                title: prev.white.title ?? whiteProfile?.title,
+                fideRating: whiteProfile?.fideRating ?? prev.white.fideRating,
+              }
+            : prev.white,
+        black:
+          prev.black.name.toLowerCase() === game.blackName.toLowerCase()
+            ? {
+                ...prev.black,
+                title: prev.black.title ?? blackProfile?.title,
+                fideRating: blackProfile?.fideRating ?? prev.black.fideRating,
+              }
+            : prev.black,
+      }))
     })
   }
 
@@ -1304,36 +1538,37 @@ export function App() {
 
   return (
     <div className="flex min-h-screen flex-col bg-[#1a1917] text-stone-200">
-      {/* Clean, friendly top navigation bar */}
-      <header className="border-b border-white/[0.07] bg-[#24221f]/95 backdrop-blur-sm">
-        <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-3 px-4 py-3">
-          <div className="flex items-center gap-3">
-            <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-[#81b64c] text-xl font-black text-[#161512] shadow-sm">
+      {/* Clean, responsive top navigation bar */}
+      <header className="sticky top-0 z-40 border-b border-white/[0.07] bg-[#24221f]/95 backdrop-blur-sm">
+        <div className="mx-auto flex max-w-6xl items-center justify-between gap-2 px-3 py-2.5 sm:gap-3 sm:px-4 sm:py-3">
+          <div className="flex min-w-0 items-center gap-2 sm:gap-3">
+            <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-[#81b64c] text-lg font-black text-[#161512] shadow-sm sm:h-9 sm:w-9 sm:text-xl">
               ♞
             </div>
-            <div>
-              <h1 className="text-base leading-tight font-bold tracking-tight text-white">
+            <div className="min-w-0">
+              <h1 className="truncate text-sm leading-tight font-bold tracking-tight text-white sm:text-base">
                 JustChess
               </h1>
-              <p className="text-xs text-stone-400">
+              <p className="hidden truncate text-xs text-stone-400 sm:block">
                 {gameMeta ?? 'Chơi cờ & Phân tích thông minh'}
               </p>
             </div>
           </div>
 
-          <div className="flex flex-wrap items-center gap-2.5">
+          <div className="flex shrink-0 items-center gap-1.5 sm:gap-2.5">
             {/* Primary unified Import CTA */}
             <button
               type="button"
               onClick={() => setImportModalTab('online')}
-              className="flex items-center gap-1.5 rounded-lg bg-[#81b64c] px-3.5 py-2 text-xs font-bold text-[#161512] shadow-sm transition hover:bg-[#95c75d]"
+              className="flex items-center gap-1 rounded-lg bg-[#81b64c] px-2.5 py-1.5 text-xs font-bold text-[#161512] shadow-sm transition hover:bg-[#95c75d] sm:px-3.5 sm:py-2"
             >
-              <span>+ Tải ván / Thế cờ</span>
+              <span>+ Tải ván</span>
+              <span className="hidden sm:inline">/ Thế cờ</span>
             </button>
 
             {/* Compact Theme Swatches */}
             <div
-              className="flex items-center gap-1 rounded-lg bg-[#1a1917] p-1 ring-1 ring-white/[0.08]"
+              className="flex items-center gap-0.5 rounded-lg bg-[#1a1917] p-1 ring-1 ring-white/[0.08] sm:gap-1"
               role="group"
               aria-label="Chọn màu bàn cờ"
             >
@@ -1348,13 +1583,13 @@ export function App() {
                     title={`Màu bàn cờ: ${t.name}`}
                     aria-label={t.name}
                     className={[
-                      'flex items-center gap-1.5 rounded-md px-2 py-1.5 text-xs font-medium transition',
+                      'flex items-center gap-1.5 rounded-md p-1.5 text-xs font-medium transition sm:px-2',
                       active
                         ? 'bg-[#34312d] text-white shadow-xs ring-1 ring-white/10'
                         : 'text-stone-400 hover:text-stone-200',
                     ].join(' ')}
                   >
-                    <span className="grid h-4 w-4 grid-cols-2 overflow-hidden rounded-[3px] ring-1 ring-black/40">
+                    <span className="grid h-3.5 w-3.5 grid-cols-2 overflow-hidden rounded-[3px] ring-1 ring-black/40 sm:h-4 sm:w-4">
                       <span style={{ backgroundColor: t.light }} />
                       <span style={{ backgroundColor: t.dark }} />
                       <span style={{ backgroundColor: t.dark }} />
@@ -1373,7 +1608,7 @@ export function App() {
               title={soundEnabled ? 'Tắt âm thanh' : 'Bật âm thanh'}
               aria-label={soundEnabled ? 'Tắt âm thanh' : 'Bật âm thanh'}
               className={[
-                'flex h-9 w-9 items-center justify-center rounded-lg text-sm ring-1 transition',
+                'flex h-8 w-8 items-center justify-center rounded-lg text-sm ring-1 transition sm:h-9 sm:w-9',
                 soundEnabled
                   ? 'bg-[#2e2c28] text-stone-100 ring-white/10 hover:bg-[#3d3a36]'
                   : 'bg-[#1a1917] text-stone-500 ring-white/5 hover:text-stone-300',
@@ -1385,16 +1620,29 @@ export function App() {
         </div>
       </header>
 
-      {/* Main Arena */}
-      <main className="mx-auto grid w-full max-w-6xl flex-1 items-start gap-7 px-4 py-6 lg:grid-cols-[minmax(0,636px)_390px] lg:justify-center">
+      {/* Main Arena (Mobile-first fluid layout -> Tablet centered -> Desktop 2-column) */}
+      <main className="mx-auto grid w-full max-w-6xl flex-1 items-start gap-4 px-2 py-3 sm:gap-6 sm:px-4 sm:py-6 lg:grid-cols-[minmax(0,636px)_400px] lg:justify-center lg:gap-7">
         {/* Left column: Evaluation Bar + Player Bars + Chessboard */}
-        <section className="flex flex-col items-center gap-3">
+        <section className="flex flex-col items-center gap-2 sm:gap-3">
           {/* Top PlayerBar aligned with chessboard */}
-          <div className="flex w-full max-w-[636px] gap-2.5">
-            <div className="w-6 shrink-0 sm:w-7" aria-hidden="true" />
+          <div className="flex w-full max-w-[636px] gap-1.5 sm:gap-2.5">
+            <div className="w-4.5 shrink-0 sm:w-7" aria-hidden="true" />
             <div className="min-w-0 flex-1">
               <PlayerBar
-                name={topColor === 'w' ? players.white : players.black}
+                name={
+                  topColor === 'w' ? players.white.name : players.black.name
+                }
+                title={
+                  topColor === 'w' ? players.white.title : players.black.title
+                }
+                rating={
+                  topColor === 'w' ? players.white.rating : players.black.rating
+                }
+                fideRating={
+                  topColor === 'w'
+                    ? players.white.fideRating
+                    : players.black.fideRating
+                }
                 color={topColor}
                 isTurn={!isGameOver && turn === topColor}
                 isInCheck={displayGame.inCheck() && turn === topColor}
@@ -1413,7 +1661,7 @@ export function App() {
           </div>
 
           {/* Evaluation Bar + Chessboard row */}
-          <div className="flex w-full max-w-[636px] items-stretch gap-2.5">
+          <div className="flex w-full max-w-[636px] items-stretch gap-1.5 sm:gap-2.5">
             <EvaluationBar
               evaluation={activeEvalForBar}
               orientation={orientation}
@@ -1442,11 +1690,28 @@ export function App() {
           </div>
 
           {/* Bottom PlayerBar aligned with chessboard */}
-          <div className="flex w-full max-w-[636px] gap-2.5">
-            <div className="w-6 shrink-0 sm:w-7" aria-hidden="true" />
+          <div className="flex w-full max-w-[636px] gap-1.5 sm:gap-2.5">
+            <div className="w-4.5 shrink-0 sm:w-7" aria-hidden="true" />
             <div className="min-w-0 flex-1">
               <PlayerBar
-                name={bottomColor === 'w' ? players.white : players.black}
+                name={
+                  bottomColor === 'w' ? players.white.name : players.black.name
+                }
+                title={
+                  bottomColor === 'w'
+                    ? players.white.title
+                    : players.black.title
+                }
+                rating={
+                  bottomColor === 'w'
+                    ? players.white.rating
+                    : players.black.rating
+                }
+                fideRating={
+                  bottomColor === 'w'
+                    ? players.white.fideRating
+                    : players.black.fideRating
+                }
                 color={bottomColor}
                 isTurn={!isGameOver && turn === bottomColor}
                 isInCheck={displayGame.inCheck() && turn === bottomColor}
@@ -1464,8 +1729,8 @@ export function App() {
             </div>
           </div>
 
-          {/* Friendly subtle interaction hint */}
-          <div className="flex w-full max-w-[636px] flex-wrap items-center justify-between gap-2 pl-8 text-[11px] text-stone-500 sm:pl-9">
+          {/* Desktop-only subtle keyboard & right-click hint */}
+          <div className="hidden w-full max-w-[636px] flex-wrap items-center justify-between gap-2 pl-9 text-[11px] text-stone-500 sm:flex">
             <span>
               Chuột phải: đánh dấu ô / kéo vẽ mũi tên (
               <kbd className="rounded bg-white/5 px-1 text-stone-400">
@@ -1487,8 +1752,8 @@ export function App() {
           </div>
         </section>
 
-        {/* Right column: Spacious 3-Tab Sidebar */}
-        <aside className="flex w-full flex-col overflow-hidden rounded-2xl bg-[#262421] shadow-2xl ring-1 ring-white/[0.08] lg:h-[736px]">
+        {/* Right column: Spacious Responsive 4-Tab Sidebar */}
+        <aside className="mx-auto flex min-h-[480px] w-full max-w-[636px] flex-col overflow-hidden rounded-2xl bg-[#262421] shadow-2xl ring-1 ring-white/[0.08] lg:mx-0 lg:h-[736px] lg:max-w-none">
           {/* Status Header */}
           <div
             className={[
@@ -1500,13 +1765,33 @@ export function App() {
                   : 'bg-[#2c2a26] text-stone-100',
             ].join(' ')}
           >
-            <span className="truncate">{status.text}</span>
+            <span className="truncate">
+              {botThinking
+                ? `🤖 ${activeBotPreset.name} đang suy nghĩ...`
+                : status.text}
+            </span>
             {moves.length > 0 && (
               <span className="shrink-0 rounded-md bg-black/30 px-2.5 py-0.5 font-mono text-xs text-stone-300">
-                Nước {viewIndex}/{moves.length}
+                {viewIndex}/{moves.length}
               </span>
             )}
           </div>
+
+          {/* Active Bot Match Banner */}
+          {botActive && (
+            <div className="flex items-center justify-between gap-2 border-b border-emerald-500/20 bg-emerald-500/10 px-3.5 py-1.5 text-xs">
+              <span className="font-semibold text-emerald-300">
+                🤖 Đang đấu với {activeBotPreset.name} ({activeBotPreset.eloLabel})
+              </span>
+              <button
+                type="button"
+                onClick={stopBotMatch}
+                className="rounded bg-white/10 px-2 py-0.5 text-[11px] font-semibold text-stone-200 hover:bg-white/20"
+              >
+                Dừng Bot
+              </button>
+            </div>
+          )}
 
           {/* Variation Branch Banner (Non-destructive exploration) */}
           {variation && (
@@ -1549,13 +1834,13 @@ export function App() {
             </div>
           )}
 
-          {/* 3 Clear Sidebar Tabs */}
-          <div className="grid grid-cols-3 gap-1 border-b border-white/[0.07] bg-[#1e1c1a] p-1.5">
+          {/* 4 Clear Sidebar Tabs */}
+          <div className="grid grid-cols-4 gap-1 border-b border-white/[0.07] bg-[#1e1c1a] p-1.5">
             <button
               type="button"
               onClick={() => setSidebarTab('game')}
               className={[
-                'rounded-lg py-2 text-xs font-semibold transition',
+                'rounded-lg py-2 text-[11px] font-semibold transition sm:text-xs',
                 sidebarTab === 'game'
                   ? 'bg-[#34312d] text-white shadow-xs'
                   : 'text-stone-400 hover:text-stone-200',
@@ -1565,9 +1850,24 @@ export function App() {
             </button>
             <button
               type="button"
+              onClick={() => setSidebarTab('bot')}
+              className={[
+                'flex items-center justify-center gap-1 rounded-lg py-2 text-[11px] font-semibold transition sm:text-xs',
+                sidebarTab === 'bot'
+                  ? 'bg-[#34312d] text-white shadow-xs'
+                  : 'text-stone-400 hover:text-stone-200',
+              ].join(' ')}
+            >
+              <span>🤖 Bot</span>
+              {botActive && (
+                <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+              )}
+            </button>
+            <button
+              type="button"
               onClick={() => setSidebarTab('review')}
               className={[
-                'flex items-center justify-center gap-1.5 rounded-lg py-2 text-xs font-semibold transition',
+                'flex items-center justify-center gap-1 rounded-lg py-2 text-[11px] font-semibold transition sm:text-xs',
                 sidebarTab === 'review'
                   ? 'bg-[#34312d] text-white shadow-xs'
                   : 'text-stone-400 hover:text-stone-200',
@@ -1575,14 +1875,14 @@ export function App() {
             >
               <span>📊 Đánh giá</span>
               {reviewResult && (
-                <span className="h-2 w-2 rounded-full bg-[#81b64c]" />
+                <span className="h-1.5 w-1.5 rounded-full bg-[#81b64c]" />
               )}
             </button>
             <button
               type="button"
               onClick={() => setSidebarTab('engine')}
               className={[
-                'flex items-center justify-center gap-1.5 rounded-lg py-2 text-xs font-semibold transition',
+                'flex items-center justify-center gap-1 rounded-lg py-2 text-[11px] font-semibold transition sm:text-xs',
                 sidebarTab === 'engine'
                   ? 'bg-[#34312d] text-white shadow-xs'
                   : 'text-stone-400 hover:text-stone-200',
@@ -1594,6 +1894,155 @@ export function App() {
               )}
             </button>
           </div>
+
+          {/* TAB: ĐẤU BOT (Play vs Maia / Stockfish Bot) */}
+          {sidebarTab === 'bot' && (
+            <div className="flex flex-1 flex-col gap-3.5 overflow-y-auto p-4">
+              {/* Choose side */}
+              <div className="rounded-xl bg-[#1f1d1a] p-3 ring-1 ring-white/[0.06]">
+                <div className="mb-2 text-[11px] font-semibold tracking-wider text-stone-400 uppercase">
+                  Chọn phe của bạn
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setPlayerSide('w')}
+                    className={[
+                      'rounded-lg py-2 text-xs font-bold transition',
+                      playerSide === 'w'
+                        ? 'bg-stone-100 text-[#161512] shadow-sm'
+                        : 'bg-[#2a2824] text-stone-300 hover:bg-[#34312d]',
+                    ].join(' ')}
+                  >
+                    ♔ Cầm Trắng (Đi trước)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setPlayerSide('b')}
+                    className={[
+                      'rounded-lg py-2 text-xs font-bold transition',
+                      playerSide === 'b'
+                        ? 'bg-[#3d3a36] text-white ring-1 ring-[#81b64c]'
+                        : 'bg-[#2a2824] text-stone-300 hover:bg-[#34312d]',
+                    ].join(' ')}
+                  >
+                    ♚ Cầm Đen (Đi sau)
+                  </button>
+                </div>
+              </div>
+
+              {/* Maia Human-like Bots */}
+              <div className="rounded-xl bg-[#1f1d1a] p-3 ring-1 ring-white/[0.06]">
+                <div className="mb-2 flex items-center justify-between">
+                  <span className="text-[11px] font-semibold tracking-wider text-fuchsia-300 uppercase">
+                    Maia Chess (Đánh như người thật)
+                  </span>
+                  {maiaStatus !== 'ready' && (
+                    <span className="text-[10px] text-stone-400">
+                      {maiaStatus === 'downloading'
+                        ? `Đang tải ${maiaProgress}%`
+                        : maiaStatus === 'loading'
+                          ? 'Đang nạp...'
+                          : 'Cần tải 43MB'}
+                    </span>
+                  )}
+                </div>
+                <div className="grid grid-cols-2 gap-1.5">
+                  {BOT_PRESETS.filter((b) => b.engine === 'maia').map((b) => (
+                    <button
+                      key={b.id}
+                      type="button"
+                      onClick={() => setBotPresetId(b.id)}
+                      className={[
+                        'flex items-center justify-between rounded-lg px-2.5 py-2 text-left transition',
+                        botPresetId === b.id
+                          ? 'bg-fuchsia-600/25 text-white ring-1 ring-fuchsia-500'
+                          : 'bg-[#2a2824] text-stone-300 hover:bg-[#34312d]',
+                      ].join(' ')}
+                    >
+                      <span className="text-xs font-bold">{b.name}</span>
+                      <span className="font-mono text-[10px] text-fuchsia-300">
+                        {b.eloLabel}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Stockfish 19 Bots */}
+              <div className="rounded-xl bg-[#1f1d1a] p-3 ring-1 ring-white/[0.06]">
+                <div className="mb-2 text-[11px] font-semibold tracking-wider text-[#a3d160] uppercase">
+                  Stockfish 19 (Đa cấp độ Elo)
+                </div>
+                <div className="flex flex-col gap-1.5">
+                  {BOT_PRESETS.filter((b) => b.engine === 'stockfish').map(
+                    (b) => (
+                      <button
+                        key={b.id}
+                        type="button"
+                        onClick={() => setBotPresetId(b.id)}
+                        className={[
+                          'flex items-center justify-between rounded-lg px-3 py-2 text-left transition',
+                          botPresetId === b.id
+                            ? 'bg-[#81b64c]/22 text-white ring-1 ring-[#81b64c]'
+                            : 'bg-[#2a2824] text-stone-300 hover:bg-[#34312d]',
+                        ].join(' ')}
+                      >
+                        <div>
+                          <div className="text-xs font-bold">{b.name}</div>
+                          <div className="text-[10px] text-stone-400">
+                            {b.desc}
+                          </div>
+                        </div>
+                        <span className="rounded bg-black/25 px-2 py-0.5 font-mono text-[11px] font-bold text-[#a3d160]">
+                          {b.eloLabel}
+                        </span>
+                      </button>
+                    ),
+                  )}
+                </div>
+              </div>
+
+              {/* Action CTA */}
+              <div className="mt-auto flex flex-col gap-2">
+                {activeBotPreset.engine === 'maia' && maiaStatus !== 'ready' ? (
+                  <button
+                    type="button"
+                    onClick={triggerMaiaDownload}
+                    disabled={
+                      maiaStatus === 'downloading' || maiaStatus === 'loading'
+                    }
+                    className="w-full rounded-xl bg-fuchsia-600 py-2.5 text-xs font-bold text-white shadow-md transition hover:bg-fuchsia-500 disabled:opacity-50"
+                  >
+                    {maiaStatus === 'downloading'
+                      ? `Đang tải model Maia-3 (${maiaProgress}%)...`
+                      : maiaStatus === 'loading'
+                        ? 'Đang nạp Maia-3...'
+                        : '⬇ Tải Maia-3 để đấu với Bot Maia'}
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => startBotMatch(botPresetId, playerSide)}
+                    className="w-full rounded-xl bg-[#81b64c] py-2.5 text-xs font-bold text-[#161512] shadow-md transition hover:bg-[#95c75d]"
+                  >
+                    ▶ Bắt đầu đấu với {activeBotPreset.name} (
+                    {activeBotPreset.eloLabel})
+                  </button>
+                )}
+
+                {botActive && (
+                  <button
+                    type="button"
+                    onClick={stopBotMatch}
+                    className="w-full rounded-xl bg-[#34312d] py-2 text-xs font-semibold text-stone-200 transition hover:bg-[#423f3a]"
+                  >
+                    ⏹ Dừng chế độ đấu Bot
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
 
           {/* TAB 1: VÁN ĐẤU (Clean Move List + Live Move Feedback + Quick Review CTA) */}
           {sidebarTab === 'game' && (
@@ -1890,8 +2339,8 @@ export function App() {
                 review={reviewResult}
                 selectedEngine={reviewEngine}
                 timeControl={timeControl}
-                whiteName={players.white}
-                blackName={players.black}
+                whiteName={players.white.name}
+                blackName={players.black.name}
                 currentPly={viewIndex}
                 totalPlies={moves.length}
                 showBestMoveHint={showBestMoveHint}
@@ -2173,62 +2622,137 @@ export function App() {
                           </div>
                         )}
 
-                        {/* Single local worker engine output */}
-                        {(engineMode === 'classical' ||
-                          engineMode === 'aggressive' ||
-                          engineMode === 'jschess') &&
-                          (activeSingleLocalResult ? (
-                            <div className="flex flex-col gap-2">
-                              <div className="flex items-center justify-between gap-2">
-                                <div className="flex items-center gap-2">
-                                  <span
+                        {/* Maia Chess (Maia-3 ONNX Human-like AI) */}
+                        {engineMode === 'maia' && (
+                          <div className="flex flex-col gap-2.5">
+                            {/* Elo level selector */}
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="text-[11px] font-semibold text-stone-400">
+                                Mức Elo người thật:
+                              </span>
+                              <div className="flex gap-1">
+                                {MAIA_ELO_LEVELS.map((lvl) => (
+                                  <button
+                                    key={lvl}
+                                    type="button"
+                                    onClick={() => setMaiaElo(lvl)}
                                     className={[
-                                      'rounded bg-[#1a1917] px-2.5 py-1 font-mono text-xs font-bold',
-                                      engineMode === 'aggressive'
-                                        ? 'text-orange-400'
-                                        : engineMode === 'jschess'
-                                          ? 'text-purple-400'
-                                          : 'text-sky-400',
+                                      'rounded px-1.5 py-0.5 font-mono text-[11px] font-bold transition',
+                                      maiaElo === lvl
+                                        ? 'bg-fuchsia-600 text-white'
+                                        : 'bg-[#2a2824] text-stone-400 hover:text-stone-200',
                                     ].join(' ')}
                                   >
-                                    {formatEvaluationScore(
-                                      activeSingleLocalResult,
-                                    )}
-                                  </span>
-                                  <span className="text-xs text-stone-400">
-                                    Depth {activeSingleLocalResult.depth}
+                                    {lvl}
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+
+                            {maiaStatus === 'idle' && (
+                              <div className="rounded-lg bg-[#2a2824] p-3 text-center">
+                                <p className="text-xs leading-relaxed text-stone-300">
+                                  <strong>Maia-3 ONNX</strong> (~43 MB) chạy trực
+                                  tiếp trên trình duyệt và tự lưu cache để dùng
+                                  lâu dài.
+                                </p>
+                                <button
+                                  type="button"
+                                  onClick={triggerMaiaDownload}
+                                  className="mt-2.5 rounded-lg bg-fuchsia-600 px-4 py-1.5 text-xs font-bold text-white transition hover:bg-fuchsia-500"
+                                >
+                                  ⬇ Tải model Maia-3 (1 lần duy nhất)
+                                </button>
+                              </div>
+                            )}
+
+                            {maiaStatus === 'downloading' && (
+                              <div className="flex flex-col gap-1.5 rounded-lg bg-[#2a2824] p-3">
+                                <div className="flex justify-between text-xs text-stone-200">
+                                  <span>Đang tải Maia-3 ONNX...</span>
+                                  <span className="font-mono font-bold text-fuchsia-400">
+                                    {maiaProgress}%
                                   </span>
                                 </div>
-                                {activeSingleLocalResult.bestMoveSan && (
-                                  <button
-                                    type="button"
-                                    onClick={() =>
-                                      playUciMoveIfValid(
-                                        activeSingleLocalResult.bestMove,
-                                      )
-                                    }
-                                    className="rounded-lg bg-[#34312d] px-3 py-1 font-mono text-xs font-bold text-stone-100 transition hover:bg-[#423f3a]"
-                                  >
-                                    Đi {activeSingleLocalResult.bestMoveSan}
-                                  </button>
-                                )}
+                                <div className="h-2 overflow-hidden rounded-full bg-[#1a1917]">
+                                  <div
+                                    className="h-full bg-fuchsia-500 transition-[width] duration-200"
+                                    style={{ width: `${maiaProgress}%` }}
+                                  />
+                                </div>
                               </div>
-                              {activeSingleLocalResult.insights.map((note) => (
-                                <p
-                                  key={note}
-                                  className="text-xs leading-relaxed text-stone-300"
-                                >
-                                  • {note}
-                                </p>
-                              ))}
-                            </div>
-                          ) : (
-                            <span className="text-xs text-stone-400">
-                              Đang tính toán trên Web Worker...
-                            </span>
-                          ))}
+                            )}
 
-                        {/* Compare 3 Engines side-by-side */}
+                            {maiaStatus === 'loading' && (
+                              <span className="text-xs text-stone-400">
+                                Đang nạp Maia-3 vào ONNX Runtime Web...
+                              </span>
+                            )}
+
+                            {maiaStatus === 'error' && (
+                              <div className="rounded-lg bg-red-500/10 p-2.5 text-xs text-red-300">
+                                <p>{maiaError ?? 'Không thể tải Maia-3.'}</p>
+                                <button
+                                  type="button"
+                                  onClick={triggerMaiaDownload}
+                                  className="mt-1.5 rounded bg-red-500/20 px-2.5 py-1 text-[11px] font-semibold text-red-200 hover:bg-red-500/30"
+                                >
+                                  Thử lại
+                                </button>
+                              </div>
+                            )}
+
+                            {maiaStatus === 'ready' &&
+                              (activeMaiaResult ? (
+                                <div className="flex flex-col gap-1.5">
+                                  <div className="flex items-center justify-between text-[11px] text-stone-400">
+                                    <span>
+                                      Dự đoán nước đi mức{' '}
+                                      <strong className="text-fuchsia-400">
+                                        Maia {maiaElo}
+                                      </strong>
+                                    </span>
+                                    <span className="font-mono">
+                                      Trắng{' '}
+                                      {Math.round(
+                                        activeMaiaResult.whiteWinPercent,
+                                      )}
+                                      %
+                                    </span>
+                                  </div>
+                                  {activeMaiaResult.topMoves.map((m) => (
+                                    <button
+                                      key={m.uci}
+                                      type="button"
+                                      onClick={() => playUciMoveIfValid(m.uci)}
+                                      className="flex items-center gap-2.5 rounded-lg bg-[#2a2824] px-2.5 py-1.5 text-left transition hover:bg-[#36332e]"
+                                    >
+                                      <span className="w-12 shrink-0 font-mono text-xs font-bold text-white">
+                                        {m.san}
+                                      </span>
+                                      <div className="h-2 flex-1 overflow-hidden rounded-full bg-[#1a1917]">
+                                        <div
+                                          className="h-full rounded-full bg-fuchsia-500"
+                                          style={{
+                                            width: `${Math.max(4, Math.round(m.probability * 100))}%`,
+                                          }}
+                                        />
+                                      </div>
+                                      <span className="w-10 shrink-0 text-right font-mono text-[11px] font-semibold text-fuchsia-300">
+                                        {Math.round(m.probability * 100)}%
+                                      </span>
+                                    </button>
+                                  ))}
+                                </div>
+                              ) : (
+                                <span className="text-xs text-stone-400">
+                                  Maia {maiaElo} đang suy luận...
+                                </span>
+                              ))}
+                          </div>
+                        )}
+
+                        {/* Compare Stockfish 19 vs Maia Chess */}
                         {engineMode === 'compare' && (
                           <div className="flex flex-col gap-2">
                             <div className="flex items-center justify-between gap-2 rounded-lg bg-[#2a2824] px-3 py-2">
@@ -2265,69 +2789,72 @@ export function App() {
 
                             <div className="flex items-center justify-between gap-2 rounded-lg bg-[#2a2824] px-3 py-2">
                               <div className="flex items-center gap-2">
-                                <span className="h-3 w-3 rounded-full bg-blue-500" />
+                                <span className="h-3 w-3 rounded-full bg-fuchsia-600" />
                                 <span className="text-xs font-semibold text-stone-100">
-                                  PeSTO Cổ điển
-                                </span>
-                                <span className="font-mono text-[11px] text-stone-500">
-                                  d3
+                                  Maia {maiaElo}
                                 </span>
                               </div>
-                              <div className="flex items-center gap-2">
-                                <span className="font-mono text-xs font-bold text-sky-400">
-                                  {classicalResult
-                                    ? formatEvaluationScore(classicalResult)
-                                    : '...'}
-                                </span>
-                                {classicalResult?.bestMoveSan && (
-                                  <button
-                                    type="button"
-                                    onClick={() =>
-                                      playUciMoveIfValid(
-                                        classicalResult.bestMove,
-                                      )
-                                    }
-                                    className="rounded bg-[#34312d] px-2 py-0.5 font-mono text-xs font-semibold text-stone-100 hover:bg-[#423f3a]"
-                                  >
-                                    {classicalResult.bestMoveSan}
-                                  </button>
-                                )}
-                              </div>
-                            </div>
-
-                            <div className="flex items-center justify-between gap-2 rounded-lg bg-[#2a2824] px-3 py-2">
-                              <div className="flex items-center gap-2">
-                                <span className="h-3 w-3 rounded-full bg-purple-500" />
-                                <span className="text-xs font-semibold text-stone-100">
-                                  js-chess-engine
-                                </span>
-                                <span className="font-mono text-[11px] text-stone-500">
-                                  MIT
-                                </span>
-                              </div>
-                              <div className="flex items-center gap-2">
-                                <span className="font-mono text-xs font-bold text-purple-400">
-                                  {jsChessResult
-                                    ? formatEvaluationScore(jsChessResult)
-                                    : '...'}
-                                </span>
-                                {jsChessResult?.bestMoveSan && (
-                                  <button
-                                    type="button"
-                                    onClick={() =>
-                                      playUciMoveIfValid(jsChessResult.bestMove)
-                                    }
-                                    className="rounded bg-[#34312d] px-2 py-0.5 font-mono text-xs font-semibold text-stone-100 hover:bg-[#423f3a]"
-                                  >
-                                    {jsChessResult.bestMoveSan}
-                                  </button>
-                                )}
-                              </div>
+                              {maiaStatus === 'ready' ? (
+                                <div className="flex items-center gap-2">
+                                  <span className="font-mono text-xs font-bold text-fuchsia-300">
+                                    {activeMaiaResult
+                                      ? `${Math.round(activeMaiaResult.whiteWinPercent)}% W`
+                                      : '...'}
+                                  </span>
+                                  {activeMaiaResult?.topMoves[0] && (
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        playUciMoveIfValid(
+                                          activeMaiaResult.bestMove,
+                                        )
+                                      }
+                                      className="rounded bg-[#34312d] px-2 py-0.5 font-mono text-xs font-semibold text-stone-100 hover:bg-[#423f3a]"
+                                    >
+                                      {activeMaiaResult.topMoves[0].san} (
+                                      {Math.round(
+                                        activeMaiaResult.topMoves[0]
+                                          .probability * 100,
+                                      )}
+                                      %)
+                                    </button>
+                                  )}
+                                </div>
+                              ) : (
+                                <button
+                                  type="button"
+                                  onClick={triggerMaiaDownload}
+                                  disabled={
+                                    maiaStatus === 'downloading' ||
+                                    maiaStatus === 'loading'
+                                  }
+                                  className="rounded bg-fuchsia-600 px-2.5 py-1 text-[11px] font-bold text-white hover:bg-fuchsia-500 disabled:opacity-50"
+                                >
+                                  {maiaStatus === 'downloading'
+                                    ? `Đang tải ${maiaProgress}%`
+                                    : maiaStatus === 'loading'
+                                      ? 'Đang nạp...'
+                                      : 'Tải Maia-3'}
+                                </button>
+                              )}
                             </div>
                           </div>
                         )}
                       </>
                     )}
+                  </div>
+
+                  {/* Transparent technical note for native/GPU engines */}
+                  <div className="rounded-xl bg-[#1f1d1a]/70 p-3 text-[11px] leading-relaxed text-stone-400 ring-1 ring-white/[0.04]">
+                    <span className="font-semibold text-stone-300">
+                      Về Lc0, Berserk, Ethereal &amp; Komodo:
+                    </span>{' '}
+                    Các engine này cần GPU (Lc0) hoặc binary native C/C++ trên
+                    server (chưa có gói WASM nhẹ chạy trực tiếp trên trình duyệt
+                    tĩnh). Hiện web chạy trực tiếp{' '}
+                    <strong className="text-stone-200">Stockfish 19 WASM</strong>{' '}
+                    và <strong className="text-stone-200">Maia-3 ONNX</strong>{' '}
+                    ngay trên máy bạn.
                   </div>
                 </>
               )}
@@ -2445,7 +2972,7 @@ export function App() {
       <footer className="border-t border-white/[0.06] bg-[#1e1c1a] px-4 py-3 text-center text-[11px] text-stone-500">
         JustChess • Giấy phép{' '}
         <span className="font-medium text-stone-400">GPL-3.0-or-later</span> •
-        Engine: Stockfish 19 (GPL-3.0), js-chess-engine (MIT), chess.js
+        Engine: Stockfish 19 (GPL-3.0), Maia-3 ONNX (GPL-3.0), chess.js
         (BSD-2-Clause) • Dự án độc lập, không liên kết chính thức với Lichess
         hay Chess.com.
       </footer>

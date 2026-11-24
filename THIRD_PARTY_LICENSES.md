@@ -9,8 +9,9 @@ All runtime packages bundled or served to the browser have been audited and are 
 | Package / Asset | Version | License | GPL-3.0 Compatibility |
 | --- | --- | --- | --- |
 | [stockfish (Stockfish.js WASM)](https://github.com/nmrugg/stockfish.js) & [Stockfish](https://github.com/official-stockfish/Stockfish) | `19.0.1` | **GPL-3.0** | Native GPL-3.0 |
+| [Maia Chess (Maia-3 ONNX)](https://github.com/CSSLab/maia-platform-frontend) | `maia3` | **GPL-3.0** | Native GPL-3.0 |
+| [ONNX Runtime Web](https://github.com/microsoft/onnxruntime) (`onnxruntime-web`) | `1.x` | **MIT** | Compatible |
 | [chess.js](https://github.com/jhlywa/chess.js) | `1.4.0` | **BSD-2-Clause** | Compatible |
-| [js-chess-engine](https://github.com/josefjadrny/js-chess-engine) | `1.0.2` | **MIT** | Compatible |
 | [React](https://react.dev/), `react-dom`, `scheduler` | `19.3.1` / `0.28.0` | **MIT** | Compatible |
 | Staunton SVG piece vectors (`src/components/ChessPiece.tsx`) | — | Based on Colin M.L. Burnett's Staunton SVG set (**GPL-2.0+ / CC BY-SA 3.0**) | Compatible |
 | Recorded chess sound effects (`public/sounds/*.wav`) | — | From [PyChess](https://github.com/pychess/pychess) (**GPL-3.0**) | Native GPL-3.0 |

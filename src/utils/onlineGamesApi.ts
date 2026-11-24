@@ -1,11 +1,28 @@
 export type OnlinePlatform = 'lichess' | 'chesscom'
 
+export interface OnlinePlayerProfile {
+  platform: OnlinePlatform
+  username: string
+  name?: string
+  title?: string
+  avatar?: string
+  fideRating?: number
+  ratings: {
+    bullet?: number
+    blitz?: number
+    rapid?: number
+    classical?: number
+  }
+}
+
 export interface OnlineGameSummary {
   id: string
   platform: OnlinePlatform
   whiteName: string
+  whiteTitle?: string
   whiteRating?: number
   blackName: string
+  blackTitle?: string
   blackRating?: number
   result: '1-0' | '0-1' | '1/2-1/2' | '*'
   userOutcome: 'win' | 'loss' | 'draw' | 'unknown'
@@ -33,8 +50,8 @@ interface LichessGameJson {
   winner?: 'white' | 'black'
   pgn?: string
   players?: {
-    white?: { user?: { name?: string }; rating?: number }
-    black?: { user?: { name?: string }; rating?: number }
+    white?: { user?: { name?: string; title?: string }; rating?: number }
+    black?: { user?: { name?: string; title?: string }; rating?: number }
   }
 }
 
@@ -93,8 +110,10 @@ async function fetchLichessGames(
         id: item.id ?? `lichess-${games.length}`,
         platform: 'lichess',
         whiteName,
+        whiteTitle: item.players?.white?.user?.title,
         whiteRating: item.players?.white?.rating,
         blackName,
+        blackTitle: item.players?.black?.user?.title,
         blackRating: item.players?.black?.rating,
         result,
         userOutcome,
@@ -214,4 +233,101 @@ export async function fetchOnlineUserGames(
   return platform === 'lichess'
     ? fetchLichessGames(username, limit)
     : fetchChessComGames(username, limit)
+}
+
+interface ChessComProfileJson {
+  username?: string
+  name?: string
+  title?: string
+  avatar?: string
+}
+
+interface ChessComStatsJson {
+  fide?: number
+  chess_bullet?: { last?: { rating?: number } }
+  chess_blitz?: { last?: { rating?: number } }
+  chess_rapid?: { last?: { rating?: number } }
+  chess_daily?: { last?: { rating?: number } }
+}
+
+interface LichessProfileJson {
+  username?: string
+  title?: string
+  profile?: {
+    firstName?: string
+    lastName?: string
+    fideRating?: number
+  }
+  perfs?: {
+    bullet?: { rating?: number }
+    blitz?: { rating?: number }
+    rapid?: { rating?: number }
+    classical?: { rating?: number }
+  }
+}
+
+export async function fetchOnlinePlayerProfile(
+  platform: OnlinePlatform,
+  username: string,
+): Promise<OnlinePlayerProfile | null> {
+  const clean = username.trim()
+  if (!clean) return null
+
+  try {
+    if (platform === 'chesscom') {
+      const lower = encodeURIComponent(clean.toLowerCase())
+      const [profileRes, statsRes] = await Promise.all([
+        fetch(`https://api.chess.com/pub/player/${lower}`),
+        fetch(`https://api.chess.com/pub/player/${lower}/stats`),
+      ])
+      if (!profileRes.ok) return null
+      const profile = (await profileRes.json()) as ChessComProfileJson
+      const stats = statsRes.ok
+        ? ((await statsRes.json()) as ChessComStatsJson)
+        : undefined
+
+      return {
+        platform: 'chesscom',
+        username: profile.username ?? clean,
+        name: profile.name,
+        title: profile.title,
+        avatar: profile.avatar,
+        fideRating: stats?.fide && stats.fide > 0 ? stats.fide : undefined,
+        ratings: {
+          bullet: stats?.chess_bullet?.last?.rating,
+          blitz: stats?.chess_blitz?.last?.rating,
+          rapid: stats?.chess_rapid?.last?.rating,
+          classical: stats?.chess_daily?.last?.rating,
+        },
+      }
+    }
+
+    const res = await fetch(
+      `https://lichess.org/api/user/${encodeURIComponent(clean)}`,
+    )
+    if (!res.ok) return null
+    const data = (await res.json()) as LichessProfileJson
+    const fullName = [data.profile?.firstName, data.profile?.lastName]
+      .filter(Boolean)
+      .join(' ')
+
+    return {
+      platform: 'lichess',
+      username: data.username ?? clean,
+      name: fullName || undefined,
+      title: data.title,
+      fideRating:
+        data.profile?.fideRating && data.profile.fideRating > 0
+          ? data.profile.fideRating
+          : undefined,
+      ratings: {
+        bullet: data.perfs?.bullet?.rating,
+        blitz: data.perfs?.blitz?.rating,
+        rapid: data.perfs?.rapid?.rating,
+        classical: data.perfs?.classical?.rating,
+      },
+    }
+  } catch {
+    return null
+  }
 }

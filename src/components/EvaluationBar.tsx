@@ -50,7 +50,7 @@ export function EvaluationBar({
           : 'Stockfish đang tắt'
       }
       className={[
-        'relative flex w-6 shrink-0 flex-col overflow-hidden rounded-md bg-[#3c3935] shadow-inner ring-1 ring-black/60 select-none sm:w-7',
+        'relative flex w-4.5 shrink-0 flex-col overflow-hidden rounded-md bg-[#3c3935] shadow-inner ring-1 ring-black/60 select-none sm:w-7',
         enabled ? 'opacity-100' : 'opacity-40',
       ].join(' ')}
     >
@@ -69,8 +69,8 @@ export function EvaluationBar({
       {/* Score label */}
       <span
         className={[
-          'pointer-events-none absolute inset-x-0 z-20 text-center text-[10px] leading-none font-bold tracking-tighter',
-          labelAtBottom ? 'bottom-1.5' : 'top-1.5',
+          'pointer-events-none absolute inset-x-0 z-20 text-center text-[8px] leading-none font-bold tracking-tighter sm:text-[10px]',
+          labelAtBottom ? 'bottom-1 sm:bottom-1.5' : 'top-1 sm:top-1.5',
           labelOnLightBg ? 'text-stone-900' : 'text-stone-100',
         ].join(' ')}
       >

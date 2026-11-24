@@ -1,9 +1,11 @@
 import { Chess, DEFAULT_POSITION, validateFen } from 'chess.js'
 import { useState } from 'react'
 import {
+  fetchOnlinePlayerProfile,
   fetchOnlineUserGames,
   type OnlineGameSummary,
   type OnlinePlatform,
+  type OnlinePlayerProfile,
 } from '../utils/onlineGamesApi'
 
 export type ImportTab = 'online' | 'pgn' | 'fen'
@@ -66,6 +68,8 @@ export function ImportModal({
   const [platform, setPlatform] = useState<OnlinePlatform>('chesscom')
   const [username, setUsername] = useState('')
   const [isLoadingGames, setIsLoadingGames] = useState(false)
+  const [playerProfile, setPlayerProfile] =
+    useState<OnlinePlayerProfile | null>(null)
   const [onlineGames, setOnlineGames] = useState<OnlineGameSummary[]>([])
   const [hasSearched, setHasSearched] = useState(false)
 
@@ -130,8 +134,13 @@ export function ImportModal({
     setError(null)
     setIsLoadingGames(true)
     setHasSearched(true)
+    setPlayerProfile(null)
     try {
-      const games = await fetchOnlineUserGames(targetPlatform, clean, 15)
+      const [profile, games] = await Promise.all([
+        fetchOnlinePlayerProfile(targetPlatform, clean),
+        fetchOnlineUserGames(targetPlatform, clean, 15),
+      ])
+      setPlayerProfile(profile)
       setOnlineGames(games)
       if (games.length === 0) {
         setError(`Không tìm thấy ván cờ tiêu chuẩn nào gần đây của "${clean}".`)
@@ -238,6 +247,7 @@ export function ImportModal({
                     type="button"
                     onClick={() => {
                       setPlatform('chesscom')
+                      setPlayerProfile(null)
                       setOnlineGames([])
                       setHasSearched(false)
                       setError(null)
@@ -255,6 +265,7 @@ export function ImportModal({
                     type="button"
                     onClick={() => {
                       setPlatform('lichess')
+                      setPlayerProfile(null)
                       setOnlineGames([])
                       setHasSearched(false)
                       setError(null)
@@ -311,6 +322,70 @@ export function ImportModal({
                   </button>
                 ))}
               </div>
+
+              {/* Player Profile Card (Title, FIDE & Live Ratings) */}
+              {playerProfile && (
+                <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl bg-[#1e1c1a] p-3 ring-1 ring-white/10">
+                  <div className="flex min-w-0 items-center gap-2.5">
+                    {playerProfile.avatar ? (
+                      <img
+                        src={playerProfile.avatar}
+                        alt={playerProfile.username}
+                        className="h-10 w-10 shrink-0 rounded-lg object-cover ring-1 ring-white/15"
+                      />
+                    ) : (
+                      <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-[#302e2b] text-base font-bold text-stone-200">
+                        ♞
+                      </div>
+                    )}
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        {playerProfile.title && (
+                          <span className="rounded bg-[#a63429] px-1.5 py-0.5 text-[10px] leading-none font-black text-white uppercase">
+                            {playerProfile.title}
+                          </span>
+                        )}
+                        <span className="truncate text-sm font-bold text-white">
+                          {playerProfile.username}
+                        </span>
+                        {playerProfile.fideRating && (
+                          <span className="rounded bg-amber-500/15 px-1.5 py-0.5 font-mono text-[10px] font-bold text-amber-300 ring-1 ring-amber-500/30">
+                            FIDE {playerProfile.fideRating}
+                          </span>
+                        )}
+                      </div>
+                      {playerProfile.name && (
+                        <div className="truncate text-[11px] text-stone-400">
+                          {playerProfile.name}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap gap-1.5 font-mono text-[11px]">
+                    {playerProfile.ratings.bullet && (
+                      <span className="rounded bg-[#2b2926] px-2 py-0.5 text-stone-200">
+                        ⚡ {playerProfile.ratings.bullet}
+                      </span>
+                    )}
+                    {playerProfile.ratings.blitz && (
+                      <span className="rounded bg-[#2b2926] px-2 py-0.5 text-amber-200">
+                        🔥 {playerProfile.ratings.blitz}
+                      </span>
+                    )}
+                    {playerProfile.ratings.rapid && (
+                      <span className="rounded bg-[#2b2926] px-2 py-0.5 text-[#b4e07c]">
+                        ⏱ {playerProfile.ratings.rapid}
+                      </span>
+                    )}
+                    {playerProfile.ratings.classical && (
+                      <span className="rounded bg-[#2b2926] px-2 py-0.5 text-sky-300">
+                        🏛 {playerProfile.ratings.classical}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              )}
 
               {/* Games List */}
               <div className="max-h-72 overflow-y-auto rounded-lg border border-white/10 bg-[#161512] p-1.5">

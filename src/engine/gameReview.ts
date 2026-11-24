@@ -1,16 +1,12 @@
 import { Chess, DEFAULT_POSITION, type PieceSymbol, type Square } from 'chess.js'
-import type {
-  ClassicalWorkerRequest,
-  ClassicalWorkerResponse,
-  WorkerEngineStyle,
-} from './classicalWorker'
+import { fetchLichessCloudEval } from './lichessCloudEval'
+import type { MaiaWorkerRequest, MaiaWorkerResponse } from './maiaWorker'
 
 export type ReviewEngineId =
   | 'stockfish-12'
   | 'stockfish-16'
-  | 'classical'
-  | 'aggressive'
-  | 'jschess'
+  | 'stockfish-cloud'
+  | 'maia-1500'
 
 export const REVIEW_ENGINES: Array<{
   id: ReviewEngineId
@@ -21,32 +17,26 @@ export const REVIEW_ENGINES: Array<{
   {
     id: 'stockfish-12',
     label: 'Stockfish 19 (Nhanh • d12)',
-    shortLabel: 'Stockfish 19',
-    desc: 'NNUE chuẩn xác, tốc độ nhanh',
+    shortLabel: 'Stockfish 19 (d12)',
+    desc: 'NNUE chuẩn xác (~3600+ Elo), tốc độ nhanh',
   },
   {
     id: 'stockfish-16',
     label: 'Stockfish 19 Deep (d16)',
-    shortLabel: 'SF19 Deep',
-    desc: 'Phân tích sâu cho ván quan trọng',
+    shortLabel: 'SF19 Deep (d16)',
+    desc: 'Phân tích sâu cho ván quan trọng & tàn cuộc',
   },
   {
-    id: 'classical',
-    label: 'PeSTO Cổ điển (d3)',
-    shortLabel: 'PeSTO Cổ điển',
-    desc: 'Đánh giá theo thế trận & vị trí quân',
+    id: 'stockfish-cloud',
+    label: 'Lichess Cloud + SF19 Hybrid',
+    shortLabel: 'Cloud + SF19',
+    desc: 'Khai cuộc depth 30–60+ từ Lichess Cloud + SF19 d14',
   },
   {
-    id: 'aggressive',
-    label: 'Tấn công (Aggressive)',
-    shortLabel: 'Tấn công',
-    desc: 'Chấm điểm theo độ chủ động & áp lực Vua',
-  },
-  {
-    id: 'jschess',
-    label: 'js-chess-engine (MIT)',
-    shortLabel: 'js-chess',
-    desc: 'Góc nhìn từ open-source engine độc lập',
+    id: 'maia-1500',
+    label: 'Maia-3 Human (1500 Elo)',
+    shortLabel: 'Maia-3 Human',
+    desc: 'Chấm điểm theo góc nhìn người thật (cần tải Maia-3)',
   },
 ]
 
@@ -769,12 +759,51 @@ function waitForReady(worker: Worker, signal: AbortSignal): Promise<void> {
   })
 }
 
-function evaluateWithLocalWorker(
+function waitForMaiaReady(worker: Worker, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(new DOMException('Aborted', 'AbortError'))
+      return
+    }
+    const onAbort = () => {
+      cleanup()
+      reject(new DOMException('Aborted', 'AbortError'))
+    }
+    const onMessage = (event: MessageEvent<MaiaWorkerResponse>) => {
+      const msg = event.data
+      if (msg.type === 'status') {
+        if (msg.status === 'ready') {
+          cleanup()
+          resolve()
+        } else if (msg.status === 'idle') {
+          cleanup()
+          reject(
+            new Error(
+              'Bạn cần tải model Maia-3 (1 lần duy nhất) trong tab 🧠 Engine trước khi dùng Maia để chấm điểm toàn ván.',
+            ),
+          )
+        } else if (msg.status === 'error') {
+          cleanup()
+          reject(new Error(msg.error ?? 'Không thể khởi chạy Maia-3.'))
+        }
+      }
+    }
+    const cleanup = () => {
+      worker.removeEventListener('message', onMessage)
+      signal.removeEventListener('abort', onAbort)
+    }
+    signal.addEventListener('abort', onAbort)
+    worker.addEventListener('message', onMessage)
+    const req: MaiaWorkerRequest = { type: 'init' }
+    worker.postMessage(req)
+  })
+}
+
+function evaluateWithMaiaWorker(
   worker: Worker,
   id: number,
   fen: string,
-  style: WorkerEngineStyle,
-  depth: number,
+  elo: number,
   signal: AbortSignal,
 ): Promise<PositionEval> {
   return new Promise((resolve, reject) => {
@@ -782,37 +811,45 @@ function evaluateWithLocalWorker(
       reject(new DOMException('Aborted', 'AbortError'))
       return
     }
-
     const onAbort = () => {
       cleanup()
       reject(new DOMException('Aborted', 'AbortError'))
     }
-
-    const onMessage = (event: MessageEvent<ClassicalWorkerResponse>) => {
-      if (event.data.id !== id) return
-      cleanup()
-      resolve({
-        cp: event.data.result.cp,
-        mate: event.data.result.mate,
-        bestMove: event.data.result.bestMove,
-      })
+    const onMessage = (event: MessageEvent<MaiaWorkerResponse>) => {
+      const msg = event.data
+      if (msg.type === 'result' && msg.id === id) {
+        cleanup()
+        const p = Math.max(
+          0.01,
+          Math.min(0.99, msg.data.whiteWinPercent / 100),
+        )
+        const approxCp = Math.round(Math.log(p / (1 - p)) / 0.00368208)
+        resolve({
+          cp: approxCp,
+          mate: null,
+          bestMove: msg.data.bestMove,
+        })
+      } else if (msg.type === 'error' && msg.id === id) {
+        cleanup()
+        reject(new Error(msg.message))
+      }
     }
-
     const cleanup = () => {
       worker.removeEventListener('message', onMessage)
       signal.removeEventListener('abort', onAbort)
     }
-
     signal.addEventListener('abort', onAbort)
     worker.addEventListener('message', onMessage)
-    const req: ClassicalWorkerRequest = { id, fen, style, depth }
+    const req: MaiaWorkerRequest = { type: 'analyze', id, fen, elo }
     worker.postMessage(req)
   })
 }
 
 /**
- * Multi-engine Chess.com-style Full Game Review.
- * Supports Stockfish 19 (d12 / d16), Classical PeSTO, Aggressive, and js-chess-engine (all via Web Workers).
+ * Multi-engine Full Game Review:
+ * - Stockfish 19 (d12 / d16)
+ * - Lichess Cloud (depth 30-60+) + Stockfish 19 (d14) Hybrid
+ * - Maia-3 Human (ONNX, 1500 Elo)
  */
 export async function runFullGameReview(
   startFen: string,
@@ -915,25 +952,29 @@ export async function runFullGameReview(
     })
   }
 
-  const isStockfish =
-    engineId === 'stockfish-12' || engineId === 'stockfish-16'
-  const sfDepth = engineId === 'stockfish-16' ? 16 : 12
+  const isMaia = engineId === 'maia-1500'
+  const useCloudHybrid = engineId === 'stockfish-cloud'
+  const sfDepth =
+    engineId === 'stockfish-16' ? 16 : useCloudHybrid ? 14 : 12
 
-  const worker = isStockfish
-    ? new Worker(
-        `${import.meta.env.BASE_URL}stockfish/stockfish-19-lite-single.js`,
-      )
-    : new Worker(new URL('./classicalWorker.ts', import.meta.url), {
+  const worker = isMaia
+    ? new Worker(new URL('./maiaWorker.ts', import.meta.url), {
         type: 'module',
       })
+    : new Worker(
+        `${import.meta.env.BASE_URL}stockfish/stockfish-19-lite-single.js`,
+      )
 
   try {
-    if (isStockfish) {
+    if (isMaia) {
+      await waitForMaiaReady(worker, signal)
+    } else {
       await waitForReady(worker, signal)
     }
 
     const evals: PositionEval[] = []
     const total = snapshots.length
+    let cloudMissStreak = 0
 
     for (let i = 0; i < total; i++) {
       if (signal.aborted) {
@@ -949,19 +990,40 @@ export async function runFullGameReview(
         })
       } else if (snap.isDraw) {
         evals.push({ cp: 0, mate: null, bestMove: null })
-      } else if (isStockfish) {
-        const res = await evaluateSingleFen(worker, snap.fen, sfDepth, signal)
-        evals.push(res)
-      } else {
-        const res = await evaluateWithLocalWorker(
+      } else if (isMaia) {
+        const res = await evaluateWithMaiaWorker(
           worker,
           i + 1,
           snap.fen,
-          engineId,
-          3,
+          1500,
           signal,
         )
         evals.push(res)
+      } else {
+        let resolved: PositionEval | null = null
+        // For Hybrid mode, query Lichess Cloud Eval (depth 30-60+) while still in theory/cached positions
+        if (useCloudHybrid && cloudMissStreak < 2) {
+          try {
+            const cloud = await fetchLichessCloudEval(snap.fen, 1, signal)
+            if (cloud && cloud.lines[0]) {
+              cloudMissStreak = 0
+              resolved = {
+                cp: cloud.lines[0].cp,
+                mate: cloud.lines[0].mate,
+                bestMove: cloud.lines[0].moves[0] ?? null,
+              }
+            } else {
+              cloudMissStreak += 1
+            }
+          } catch {
+            cloudMissStreak += 1
+          }
+        }
+
+        if (!resolved) {
+          resolved = await evaluateSingleFen(worker, snap.fen, sfDepth, signal)
+        }
+        evals.push(resolved)
       }
 
       onProgress?.(i + 1, total)
@@ -1046,7 +1108,7 @@ export async function runFullGameReview(
       black: computeSideSummary(reviewedMoves, 'b'),
     }
   } finally {
-    if (isStockfish) {
+    if (!isMaia) {
       worker.postMessage('quit')
     }
     worker.terminate()

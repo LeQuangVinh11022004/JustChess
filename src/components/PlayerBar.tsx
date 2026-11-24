@@ -3,6 +3,9 @@ import { ChessPiece } from './ChessPiece'
 
 interface PlayerBarProps {
   name: string
+  title?: string
+  rating?: number
+  fideRating?: number
   color: 'w' | 'b'
   isTurn: boolean
   isInCheck: boolean
@@ -12,6 +15,9 @@ interface PlayerBarProps {
 
 export function PlayerBar({
   name,
+  title,
+  rating,
+  fideRating,
   color,
   isTurn,
   isInCheck,
@@ -23,29 +29,47 @@ export function PlayerBar({
   return (
     <div
       className={[
-        'flex w-full max-w-[600px] items-center justify-between gap-3 rounded-xl px-3.5 py-2.5 transition-all',
+        'flex w-full max-w-[600px] items-center justify-between gap-2 rounded-xl px-2.5 py-2 transition-all sm:gap-3 sm:px-3.5 sm:py-2.5',
         isTurn
           ? 'bg-[#2a2824] shadow-md ring-1 ring-[#81b64c]/40'
           : 'bg-[#24221f] ring-1 ring-white/[0.06]',
       ].join(' ')}
     >
-      <div className="flex min-w-0 items-center gap-3">
+      <div className="flex min-w-0 items-center gap-2 sm:gap-3">
         <div
           className={[
-            'flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border shadow-xs',
+            'flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border shadow-xs sm:h-10 sm:w-10',
             color === 'w'
               ? 'border-stone-300/60 bg-stone-100'
               : 'border-stone-600/60 bg-stone-800',
           ].join(' ')}
         >
-          <ChessPiece type="k" color={color} className="h-7 w-7" />
+          <ChessPiece type="k" color={color} className="h-6 w-6 sm:h-7 sm:w-7" />
         </div>
 
         <div className="min-w-0">
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-1.5">
+            {title && (
+              <span className="rounded bg-[#a63429] px-1.5 py-0.5 text-[10px] leading-none font-black tracking-wide text-white uppercase shadow-xs">
+                {title}
+              </span>
+            )}
             <span className="truncate text-sm font-bold text-stone-100">
               {name}
             </span>
+            {rating && (
+              <span className="font-mono text-xs font-semibold text-stone-400">
+                ({rating})
+              </span>
+            )}
+            {fideRating && (
+              <span
+                title="Hệ số FIDE chính thức"
+                className="rounded bg-amber-500/15 px-1.5 py-0.5 font-mono text-[10px] font-bold text-amber-300 ring-1 ring-amber-500/30"
+              >
+                FIDE {fideRating}
+              </span>
+            )}
             {isInCheck && (
               <span className="rounded-md bg-red-600 px-1.5 py-0.5 text-[10px] font-bold tracking-wide text-white uppercase">
                 Đang bị chiếu
