@@ -28,6 +28,7 @@ import {
   detectTimeControl,
   REVIEW_ENGINES,
   runFullGameReview,
+  type GameOutcome,
   type GameReviewResult,
   type ReviewEngineId,
   type ReviewMoveInfo,
@@ -262,6 +263,7 @@ export function App() {
   const [sourcePlatform, setSourcePlatform] = useState<
     'chesscom' | 'lichess' | 'unknown'
   >('unknown')
+  const [pgnResult, setPgnResult] = useState<GameOutcome>(null)
 
   const [selectedSquare, setSelectedSquare] = useState<Square | null>(null)
   const [orientation, setOrientation] = useState<'w' | 'b'>('w')
@@ -1320,6 +1322,7 @@ export function App() {
     setPlayers(DEFAULT_PLAYERS)
     setGameMeta(null)
     setSourcePlatform('unknown')
+    setPgnResult(null)
     setPendingPromotion(null)
     setSelectedSquare(null)
   }
@@ -1353,6 +1356,7 @@ export function App() {
       blackRating?: number
       metaOverride?: string
       explicitTimeControl?: string
+      explicitResult?: '1-0' | '0-1' | '1/2-1/2' | '*'
       platform?: 'chesscom' | 'lichess' | 'unknown'
     },
   ) => {
@@ -1372,6 +1376,12 @@ export function App() {
           : siteStr.includes('chess.com')
             ? 'chesscom'
             : 'unknown'),
+    )
+    const rawRes = opts?.explicitResult ?? headers.Result
+    setPgnResult(
+      rawRes === '1-0' || rawRes === '0-1' || rawRes === '1/2-1/2'
+        ? rawRes
+        : null,
     )
     const customStartFen =
       headers.SetUp === '1' && headers.FEN ? headers.FEN : DEFAULT_POSITION
@@ -1458,6 +1468,7 @@ export function App() {
       blackRating: game.blackRating,
       metaOverride: meta,
       explicitTimeControl: game.timeControl,
+      explicitResult: game.result,
       platform: game.platform,
     })
 
@@ -2412,6 +2423,21 @@ export function App() {
                 whiteRating={players.white.rating}
                 blackRating={players.black.rating}
                 sourcePlatform={sourcePlatform}
+                gameOutcome={
+                  pgnResult ??
+                  (() => {
+                    const finalGame = buildGameAtPly(
+                      startFen,
+                      moves,
+                      moves.length,
+                    )
+                    if (finalGame.isCheckmate()) {
+                      return finalGame.turn() === 'w' ? '0-1' : '1-0'
+                    }
+                    if (finalGame.isDraw()) return '1/2-1/2'
+                    return null
+                  })()
+                }
                 currentPly={viewIndex}
                 totalPlies={moves.length}
                 showBestMoveHint={showBestMoveHint}

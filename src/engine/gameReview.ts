@@ -863,136 +863,223 @@ function roundTo50(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, Math.round(value / 50) * 50))
 }
 
-/**
- * Converts a known rating from Lichess or Chess.com into the internal Chess.com baseline scale.
- */
-function normalizeKnownEloToChessCom(
-  elo: number,
-  sourcePlatform: 'chesscom' | 'lichess' | 'unknown',
-): number {
-  if (sourcePlatform === 'lichess') {
-    const offset =
-      elo < 2450
-        ? 260 - ((Math.max(900, elo) - 900) / 1550) * 90
-        : Math.max(40, 170 - ((elo - 2450) / 500) * 130)
-    return Math.max(400, elo - offset)
+export type GameOutcome = '1-0' | '0-1' | '1/2-1/2' | null
+
+function toCrossPlatformFromChessCom(
+  rawChessCom: number,
+  timeControl: TimeControlCategory,
+): EstimatedRatings {
+  const tcExtra: Record<
+    TimeControlCategory,
+    { lichessExtra: number; fideShift: number }
+  > = {
+    bullet: { lichessExtra: 35, fideShift: -40 },
+    blitz: { lichessExtra: 15, fideShift: 0 },
+    rapid: { lichessExtra: 0, fideShift: 0 },
+    classical: { lichessExtra: -20, fideShift: 35 },
   }
-  return elo
+  const extra = tcExtra[timeControl]
+
+  const lichessOffset =
+    (rawChessCom < 2200
+      ? 265 - ((Math.max(400, rawChessCom) - 400) / 1800) * 115
+      : Math.max(40, 150 - ((rawChessCom - 2200) / 600) * 110)) +
+    extra.lichessExtra
+  const rawLichess = rawChessCom + lichessOffset
+
+  const rawFide =
+    (rawChessCom < 1400
+      ? 950 + ((Math.max(400, rawChessCom) - 400) / 1000) * 500
+      : 1450 + (rawChessCom - 1400) * 0.94) + extra.fideShift
+
+  return {
+    fide: roundTo50(rawFide, 1000, 2850),
+    chesscom: roundTo50(rawChessCom, 300, 2900),
+    lichess: roundTo50(rawLichess, 700, 2950),
+  }
 }
 
 /**
- * Estimates single-game performance Elo across Chess.com, Lichess, and FIDE scales.
- * Combines:
- * 1. Lichess Volatility-Weighted Accuracy (60%) + Capped ACPL (40%)
- * 2. Game-length confidence shrinkage
- * 3. Time-control calibration (Bullet / Blitz / Rapid / Classical)
- * 4. Chess.com-style Bayesian anchoring to actual player & opponent Elo (when available)
+ * Purely objective single-game performance Elo (Chess.com scale) computed strictly
+ * from the actual move quality played in THIS game — zero anchoring to profile Elo
+ * and zero artificial pull toward 1400.
  */
-export function estimateCrossPlatformRatings(params: {
+function computeRawChessComPerf(params: {
   accuracy: number
   acpl?: number
-  evaluatedMoves?: number
+  totalMoves?: number
   blunder: number
   mistake: number
   brilliant: number
   great: number
   timeControl?: TimeControlCategory
-  playerRating?: number
-  opponentRating?: number
-  sourcePlatform?: 'chesscom' | 'lichess' | 'unknown'
-}): EstimatedRatings {
+  sideResult?: 'win' | 'loss' | 'draw' | 'unknown'
+}): number {
   const {
     accuracy,
     acpl = Math.max(8, Math.round((100 - accuracy) * 2.4)),
-    evaluatedMoves = 25,
+    totalMoves = 25,
+    blunder,
+    mistake,
     brilliant,
     great,
     timeControl = 'rapid',
-    playerRating,
-    opponentRating,
-    sourcePlatform = 'unknown',
+    sideResult = 'unknown',
   } = params
 
-  // 1. Accuracy-based Chess.com Rapid baseline
+  // 1. Accuracy -> Elo curve (Rapid reference):
+  //    35% -> ~420 | 50% -> ~680 | 65% -> ~1060 | 75% -> ~1400 | 82% -> ~1720 | 88% -> ~2040 | 94% -> ~2400 | 98% -> ~2680
   const accClamped = Math.max(20, Math.min(99.5, accuracy))
-  const eloFromAcc = 350 + Math.pow((accClamped - 20) / 80, 1.55) * 2350
+  const eloFromAcc = 300 + Math.pow((accClamped - 20) / 80, 1.58) * 2460
 
-  // 2. ACPL-based Chess.com Rapid baseline
-  const acplClamped = Math.max(5, Math.min(250, acpl))
-  const eloFromAcpl = 2780 * Math.exp(-0.0098 * acplClamped) + 220
+  // 2. ACPL -> Elo curve (empirical Lichess/FIDE mapping):
+  //    ACPL 8 -> ~2650 | 15 -> ~2400 | 26 -> ~2080 | 40 -> ~1760 | 58 -> ~1440 | 85 -> ~1100 | 135 -> ~720
+  const acplClamped = Math.max(4, Math.min(260, acpl))
+  const eloFromAcpl = 2850 * Math.exp(-0.0115 * acplClamped) + 140
 
-  // 3. Blend Accuracy (60%) + ACPL (40%) + subtle bonus for genuine tactical gems
-  const blendedBase =
-    0.6 * eloFromAcc +
-    0.4 * eloFromAcpl +
-    Math.min(90, brilliant * 45 + great * 20)
+  // 3. Error rate adjustment (normalized per move so short/long games are fair)
+  const safeMoves = Math.max(6, totalMoves)
+  const blunderRate = blunder / safeMoves
+  const mistakeRate = mistake / safeMoves
+  const errorPenalty = Math.min(280, blunderRate * 900 + mistakeRate * 320)
 
-  // 4. Time-control specific shifts
-  const tcConfig: Record<
-    TimeControlCategory,
-    { tcShift: number; lichessExtra: number; fideShift: number }
-  > = {
-    bullet: { tcShift: 175, lichessExtra: 35, fideShift: -40 },
-    blitz: { tcShift: 85, lichessExtra: 15, fideShift: 0 },
-    rapid: { tcShift: 0, lichessExtra: 0, fideShift: 0 },
-    classical: { tcShift: -95, lichessExtra: -20, fideShift: 35 },
+  // 4. Genuine tactical brilliance bonus
+  const tacticalBonus = Math.min(110, brilliant * 55 + great * 25)
+
+  // 5. Time-control calibration
+  const tcShiftMap: Record<TimeControlCategory, number> = {
+    bullet: 160,
+    blitz: 80,
+    rapid: 0,
+    classical: -90,
   }
 
-  const cfg = tcConfig[timeControl]
-  const purePerfChessCom = Math.max(
-    400,
-    Math.min(2850, blendedBase + cfg.tcShift),
-  )
+  // 6. Small objective result adjustment (winning cleanly > losing at equal accuracy)
+  const resultNudge =
+    sideResult === 'win' ? 75 : sideResult === 'loss' ? -75 : 0
 
-  // 5. Anchor to known player & opponent Elo (Chess.com Game Rating style)
-  //    If known: blend 52% match-anchored expectation + 48% pure accuracy/ACPL performance.
-  //    If unknown: shrink extreme short-game estimates toward 1400 prior.
-  let rawChessCom: number
-  if (playerRating || opponentRating) {
-    const normSelf = playerRating
-      ? normalizeKnownEloToChessCom(playerRating, sourcePlatform)
-      : undefined
-    const normOpp = opponentRating
-      ? normalizeKnownEloToChessCom(opponentRating, sourcePlatform)
-      : undefined
-    const matchAnchor =
-      normSelf && normOpp
-        ? 0.55 * normSelf + 0.45 * normOpp
-        : (normSelf ?? normOpp ?? 1400)
+  const objectiveElo =
+    0.55 * eloFromAcc +
+    0.45 * eloFromAcpl -
+    errorPenalty +
+    tacticalBonus +
+    tcShiftMap[timeControl] +
+    resultNudge
 
-    // Longer games give higher weight to pure accuracy performance; short games stay closer to anchor
-    const perfWeight = Math.min(0.55, Math.max(0.28, (evaluatedMoves / 24) * 0.55))
-    const anchored =
-      matchAnchor * (1 - perfWeight) + purePerfChessCom * perfWeight
-    // Cap unrealistic swing to ±450 from match anchor
-    rawChessCom = Math.max(
-      400,
-      Math.min(2900, Math.max(matchAnchor - 450, Math.min(matchAnchor + 450, anchored))),
-    )
-  } else {
-    const confidence = Math.min(1, Math.max(0.35, evaluatedMoves / 14))
-    const stabilizedRapid = 1400 + (blendedBase - 1400) * confidence
-    rawChessCom = Math.max(400, Math.min(2800, stabilizedRapid + cfg.tcShift))
+  return Math.max(300, Math.min(2900, objectiveElo))
+}
+
+/**
+ * Estimates objective single-game performance Elo across Chess.com, Lichess, and FIDE scales.
+ */
+export function estimateCrossPlatformRatings(params: {
+  accuracy: number
+  acpl?: number
+  totalMoves?: number
+  blunder: number
+  mistake: number
+  brilliant: number
+  great: number
+  timeControl?: TimeControlCategory
+  sideResult?: 'win' | 'loss' | 'draw' | 'unknown'
+}): EstimatedRatings {
+  const tc = params.timeControl ?? 'rapid'
+  const rawChessCom = computeRawChessComPerf(params)
+  return toCrossPlatformFromChessCom(rawChessCom, tc)
+}
+
+/**
+ * Estimates both White and Black objective game ratings together, preserving
+ * logical winner > loser ordering when the winner matched or outplayed the loser.
+ */
+export function estimateMatchRatings(params: {
+  white: SideReviewSummary
+  black: SideReviewSummary
+  timeControl: TimeControlCategory
+  gameOutcome?: GameOutcome
+}): { white: EstimatedRatings; black: EstimatedRatings } {
+  const { white, black, timeControl, gameOutcome = null } = params
+
+  const whiteSideResult =
+    gameOutcome === '1-0'
+      ? 'win'
+      : gameOutcome === '0-1'
+        ? 'loss'
+        : gameOutcome === '1/2-1/2'
+          ? 'draw'
+          : 'unknown'
+  const blackSideResult =
+    gameOutcome === '0-1'
+      ? 'win'
+      : gameOutcome === '1-0'
+        ? 'loss'
+        : gameOutcome === '1/2-1/2'
+          ? 'draw'
+          : 'unknown'
+
+  const whiteTotalMoves =
+    white.brilliant +
+    white.great +
+    white.best +
+    white.excellent +
+    white.good +
+    white.book +
+    white.inaccuracy +
+    white.mistake +
+    white.blunder
+  const blackTotalMoves =
+    black.brilliant +
+    black.great +
+    black.best +
+    black.excellent +
+    black.good +
+    black.book +
+    black.inaccuracy +
+    black.mistake +
+    black.blunder
+
+  let wRaw = computeRawChessComPerf({
+    accuracy: white.accuracy,
+    acpl: white.acpl,
+    totalMoves: whiteTotalMoves,
+    blunder: white.blunder,
+    mistake: white.mistake,
+    brilliant: white.brilliant,
+    great: white.great,
+    timeControl,
+    sideResult: whiteSideResult,
+  })
+
+  let bRaw = computeRawChessComPerf({
+    accuracy: black.accuracy,
+    acpl: black.acpl,
+    totalMoves: blackTotalMoves,
+    blunder: black.blunder,
+    mistake: black.mistake,
+    brilliant: black.brilliant,
+    great: black.great,
+    timeControl,
+    sideResult: blackSideResult,
+  })
+
+  // Enforce logical winner > loser consistency in decisive games
+  if (gameOutcome === '1-0' && white.accuracy >= black.accuracy - 4) {
+    if (wRaw <= bRaw + 50) {
+      const mid = (wRaw + bRaw) / 2
+      wRaw = Math.min(2900, Math.max(wRaw, mid + 60))
+      bRaw = Math.max(300, Math.min(bRaw, wRaw - 100))
+    }
+  } else if (gameOutcome === '0-1' && black.accuracy >= white.accuracy - 4) {
+    if (bRaw <= wRaw + 50) {
+      const mid = (wRaw + bRaw) / 2
+      bRaw = Math.min(2900, Math.max(bRaw, mid + 60))
+      wRaw = Math.max(300, Math.min(wRaw, bRaw - 100))
+    }
   }
-
-  // Lichess Glicko-2 offset (+270 around 1000–1600, narrowing smoothly to ~+50 above 2500)
-  const lichessOffset =
-    (rawChessCom < 2200
-      ? 275 - ((rawChessCom - 800) / 1400) * 95
-      : Math.max(40, 180 - ((rawChessCom - 2200) / 600) * 140)) +
-    cfg.lichessExtra
-  const rawLichess = rawChessCom + lichessOffset
-
-  // FIDE scaling (floor ~1000–1400, stricter above 1800)
-  const rawFide =
-    (rawChessCom < 1400
-      ? 950 + ((rawChessCom - 400) / 1000) * 500
-      : 1450 + (rawChessCom - 1400) * 0.91) + cfg.fideShift
 
   return {
-    fide: roundTo50(rawFide, 1000, 2850),
-    chesscom: roundTo50(rawChessCom, 400, 2900),
-    lichess: roundTo50(rawLichess, 800, 2950),
+    white: toCrossPlatformFromChessCom(wRaw, timeControl),
+    black: toCrossPlatformFromChessCom(bRaw, timeControl),
   }
 }
 
@@ -1096,7 +1183,7 @@ function computeSideSummary(
   summary.ratings = estimateCrossPlatformRatings({
     accuracy,
     acpl,
-    evaluatedMoves,
+    totalMoves: sideMoves.length,
     blunder: summary.blunder,
     mistake: summary.mistake,
     brilliant: summary.brilliant,

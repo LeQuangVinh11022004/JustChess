@@ -1,9 +1,10 @@
 import {
   CLASSIFICATION_META,
   CLASSIFICATION_ORDER,
-  estimateCrossPlatformRatings,
+  estimateMatchRatings,
   REVIEW_ENGINES,
   TIME_CONTROL_META,
+  type GameOutcome,
   type GameReviewResult,
   type ReviewEngineId,
   type ReviewMoveInfo,
@@ -27,6 +28,7 @@ interface GameReviewPanelProps {
   whiteRating?: number
   blackRating?: number
   sourcePlatform?: 'chesscom' | 'lichess' | 'unknown'
+  gameOutcome?: GameOutcome
   currentPly: number
   totalPlies: number
   showBestMoveHint: boolean
@@ -47,6 +49,7 @@ export function GameReviewPanel({
   whiteRating,
   blackRating,
   sourcePlatform = 'unknown',
+  gameOutcome = null,
   currentPly,
   totalPlies,
   showBestMoveHint,
@@ -58,32 +61,11 @@ export function GameReviewPanel({
   onReRunReview,
 }: GameReviewPanelProps) {
   const tcMeta = TIME_CONTROL_META[timeControl]
-  const hasKnownRatings = Boolean(whiteRating || blackRating)
-  const whiteRatings = estimateCrossPlatformRatings({
-    accuracy: review.white.accuracy,
-    acpl: review.white.acpl,
-    evaluatedMoves: review.white.evaluatedMoves,
-    blunder: review.white.blunder,
-    mistake: review.white.mistake,
-    brilliant: review.white.brilliant,
-    great: review.white.great,
+  const { white: whiteRatings, black: blackRatings } = estimateMatchRatings({
+    white: review.white,
+    black: review.black,
     timeControl,
-    playerRating: whiteRating,
-    opponentRating: blackRating,
-    sourcePlatform,
-  })
-  const blackRatings = estimateCrossPlatformRatings({
-    accuracy: review.black.accuracy,
-    acpl: review.black.acpl,
-    evaluatedMoves: review.black.evaluatedMoves,
-    blunder: review.black.blunder,
-    mistake: review.black.mistake,
-    brilliant: review.black.brilliant,
-    great: review.black.great,
-    timeControl,
-    playerRating: blackRating,
-    opponentRating: whiteRating,
-    sourcePlatform,
+    gameOutcome,
   })
   const currentMove: ReviewMoveInfo | null =
     currentPly > 0 ? review.moves[currentPly - 1] ?? null : null
@@ -422,12 +404,20 @@ export function GameReviewPanel({
             </div>
           </div>
 
-          {hasKnownRatings && (
-            <p className="mt-1.5 text-center text-[10px] text-stone-400">
-              Đã hiệu chỉnh theo Elo thực tế ({whiteRating ?? '?'} vs{' '}
-              {blackRating ?? '?'}) &amp; độ chính xác ván đấu.
-            </p>
-          )}
+          <p className="mt-1.5 text-center text-[10px] text-stone-400">
+            Ước lượng khách quan từ Accuracy, ACPL &amp; chất lượng nước đi thực
+            tế của ván đấu.
+            {(whiteRating || blackRating) && (
+              <>
+                {' '}
+                (Elo hồ sơ: {whiteRating ?? '?'} vs {blackRating ?? '?'}
+                {sourcePlatform !== 'unknown'
+                  ? ` • ${sourcePlatform === 'chesscom' ? 'Chess.com' : 'Lichess'}`
+                  : ''}
+                )
+              </>
+            )}
+          </p>
           {timeControl === 'bullet' && (
             <p className="mt-1 text-center text-[10px] text-stone-500">
               *FIDE không có hệ số Bullet riêng nên quy đổi sang FIDE Blitz.
