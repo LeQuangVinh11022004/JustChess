@@ -259,6 +259,9 @@ export function App() {
   const [variation, setVariation] = useState<VariationBranch | null>(null)
   const [players, setPlayers] = useState<PlayersState>(DEFAULT_PLAYERS)
   const [gameMeta, setGameMeta] = useState<string | null>(null)
+  const [sourcePlatform, setSourcePlatform] = useState<
+    'chesscom' | 'lichess' | 'unknown'
+  >('unknown')
 
   const [selectedSquare, setSelectedSquare] = useState<Square | null>(null)
   const [orientation, setOrientation] = useState<'w' | 'b'>('w')
@@ -1316,6 +1319,7 @@ export function App() {
     setViewIndex(0)
     setPlayers(DEFAULT_PLAYERS)
     setGameMeta(null)
+    setSourcePlatform('unknown')
     setPendingPromotion(null)
     setSelectedSquare(null)
   }
@@ -1349,6 +1353,7 @@ export function App() {
       blackRating?: number
       metaOverride?: string
       explicitTimeControl?: string
+      platform?: 'chesscom' | 'lichess' | 'unknown'
     },
   ) => {
     botAbortRef.current?.abort()
@@ -1359,6 +1364,15 @@ export function App() {
     parsed.loadPgn(pgnText)
     const headers = parsed.getHeaders()
     setTimeControl(detectTimeControl(headers, opts?.explicitTimeControl))
+    const siteStr = (headers.Site ?? '').toLowerCase()
+    setSourcePlatform(
+      opts?.platform ??
+        (siteStr.includes('lichess')
+          ? 'lichess'
+          : siteStr.includes('chess.com')
+            ? 'chesscom'
+            : 'unknown'),
+    )
     const customStartFen =
       headers.SetUp === '1' && headers.FEN ? headers.FEN : DEFAULT_POSITION
 
@@ -1444,6 +1458,7 @@ export function App() {
       blackRating: game.blackRating,
       metaOverride: meta,
       explicitTimeControl: game.timeControl,
+      platform: game.platform,
     })
 
     // Enrich both players asynchronously with official Title & FIDE rating from platform profile API
@@ -2394,6 +2409,9 @@ export function App() {
                 timeControl={timeControl}
                 whiteName={players.white.name}
                 blackName={players.black.name}
+                whiteRating={players.white.rating}
+                blackRating={players.black.rating}
+                sourcePlatform={sourcePlatform}
                 currentPly={viewIndex}
                 totalPlies={moves.length}
                 showBestMoveHint={showBestMoveHint}

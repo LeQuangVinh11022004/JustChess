@@ -24,6 +24,9 @@ interface GameReviewPanelProps {
   timeControl: TimeControlCategory
   whiteName: string
   blackName: string
+  whiteRating?: number
+  blackRating?: number
+  sourcePlatform?: 'chesscom' | 'lichess' | 'unknown'
   currentPly: number
   totalPlies: number
   showBestMoveHint: boolean
@@ -41,6 +44,9 @@ export function GameReviewPanel({
   timeControl,
   whiteName,
   blackName,
+  whiteRating,
+  blackRating,
+  sourcePlatform = 'unknown',
   currentPly,
   totalPlies,
   showBestMoveHint,
@@ -52,6 +58,7 @@ export function GameReviewPanel({
   onReRunReview,
 }: GameReviewPanelProps) {
   const tcMeta = TIME_CONTROL_META[timeControl]
+  const hasKnownRatings = Boolean(whiteRating || blackRating)
   const whiteRatings = estimateCrossPlatformRatings({
     accuracy: review.white.accuracy,
     acpl: review.white.acpl,
@@ -61,6 +68,9 @@ export function GameReviewPanel({
     brilliant: review.white.brilliant,
     great: review.white.great,
     timeControl,
+    playerRating: whiteRating,
+    opponentRating: blackRating,
+    sourcePlatform,
   })
   const blackRatings = estimateCrossPlatformRatings({
     accuracy: review.black.accuracy,
@@ -71,6 +81,9 @@ export function GameReviewPanel({
     brilliant: review.black.brilliant,
     great: review.black.great,
     timeControl,
+    playerRating: blackRating,
+    opponentRating: whiteRating,
+    sourcePlatform,
   })
   const currentMove: ReviewMoveInfo | null =
     currentPly > 0 ? review.moves[currentPly - 1] ?? null : null
@@ -409,8 +422,14 @@ export function GameReviewPanel({
             </div>
           </div>
 
+          {hasKnownRatings && (
+            <p className="mt-1.5 text-center text-[10px] text-stone-400">
+              Đã hiệu chỉnh theo Elo thực tế ({whiteRating ?? '?'} vs{' '}
+              {blackRating ?? '?'}) &amp; độ chính xác ván đấu.
+            </p>
+          )}
           {timeControl === 'bullet' && (
-            <p className="mt-1.5 text-center text-[10px] text-stone-500">
+            <p className="mt-1 text-center text-[10px] text-stone-500">
               *FIDE không có hệ số Bullet riêng nên quy đổi sang FIDE Blitz.
             </p>
           )}

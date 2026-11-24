@@ -296,16 +296,49 @@ const MATERIAL_VALUE: Record<PieceSymbol, number> = {
   k: 0,
 }
 
-function getSideMaterial(chess: Chess, color: 'w' | 'b'): number {
-  let total = 0
-  for (const row of chess.board()) {
-    for (const cell of row) {
-      if (cell && cell.color === color) {
-        total += MATERIAL_VALUE[cell.type]
-      }
-    }
+/**
+ * Static Exchange Evaluation (SEE) on a target square after a move has been played.
+ * Returns the net material delta for the original mover (including any piece just captured
+ * on that square) assuming both sides recapture optimally with their least valuable attacker.
+ * Example:
+ *  - Defended Knight on d5 traded 3-for-3 -> returns 0 (NOT a sacrifice).
+ *  - Bxh7+ taking a pawn (+1) then Kxh7 (-3) with no recapture -> returns -2 (TRUE sacrifice).
+ *  - Qb8+ (+0) then Nxb8 (-9) with no recapture -> returns -9 (TRUE sacrifice).
+ */
+function computeExchangeNetForMover(
+  fenAfterMove: string,
+  targetSquare: Square,
+  capturedOnMove: PieceSymbol | undefined,
+): number {
+  const initialGain = capturedOnMove ? MATERIAL_VALUE[capturedOnMove] : 0
+  const sim = new Chess()
+  sim.load(fenAfterMove)
+
+  // Recursively evaluate minimax material gain for the side to move on targetSquare
+  function seeRec(depth: number): number {
+    if (depth >= 8) return 0
+    const captures = sim
+      .moves({ verbose: true })
+      .filter((m) => m.to === targetSquare && m.captured)
+    if (captures.length === 0) return 0
+
+    // Least valuable attacker first (standard SEE ordering)
+    captures.sort(
+      (a, b) => MATERIAL_VALUE[a.piece] - MATERIAL_VALUE[b.piece],
+    )
+    const bestAttacker = captures[0]
+    const gain = MATERIAL_VALUE[bestAttacker.captured!]
+
+    sim.move(bestAttacker)
+    const reply = seeRec(depth + 1)
+    sim.undo()
+
+    return Math.max(0, gain - reply)
   }
-  return total
+
+  // Opponent moves first on targetSquare; their positive SEE is mover's loss
+  const opponentGain = seeRec(0)
+  return initialGain - opponentGain
 }
 
 function uciToSanSafe(fen: string, uci: string | null): string | null {
@@ -497,41 +530,52 @@ function classifyMove(params: {
   // Opening book heuristic: standard opening plies with balanced eval and low loss
   if (
     isStandardStart &&
-    ply <= 8 &&
-    winLoss <= 2.0 &&
-    moverWinAfter >= 45 &&
+    ply <= 10 &&
+    winLoss <= 1.8 &&
+    moverWinAfter >= 44 &&
     moverWinAfter <= 57
   ) {
     return 'book'
   }
 
-  // Brilliant: true tactical sacrifice that is best/near-best in a non-trivial position
+  // Brilliant (!!): strict Chess.com criteria:
+  // 1. True material sacrifice (SEE <= -2, NOT an equal trade)
+  // 2. Top / near-top move (winLoss <= 1.2%)
+  // 3. Not already trivially crushing (< 88%), unless it unlocks a new forced mate
+  // 4. Keeps at least equal/winning position (>= 48%)
+  // 5. Meaningful tactical difficulty (onlyMoveGap >= 4% or forces mate)
+  const unlocksNewMate =
+    mateAfterForMover !== null &&
+    mateAfterForMover > 0 &&
+    (mateBeforeForMover === null || mateBeforeForMover <= 0)
+
   if (
     isSacrifice &&
-    (isTopChoice || winLoss <= 1.8) &&
-    moverWinBefore < 92 &&
-    moverWinAfter >= 52 &&
-    ply >= 6
+    (isTopChoice || winLoss <= 1.2) &&
+    ply >= 6 &&
+    moverWinAfter >= 48 &&
+    (moverWinBefore < 88 || unlocksNewMate) &&
+    (onlyMoveGap >= 4 || unlocksNewMate)
   ) {
     return 'brilliant'
   }
 
-  // Great (!): genuine "only move" (large MultiPV1 vs MultiPV2 gap >= 12% win chance)
+  // Great (!): genuine "only move" (large MultiPV1 vs MultiPV2 gap >= 14% win chance)
   // OR cleanly punishing an opponent's blunder with the exact top move
   if (
     isTopChoice &&
-    winLoss <= 1.2 &&
+    winLoss <= 1.0 &&
     ply >= 6 &&
-    moverWinBefore < 94 &&
-    (onlyMoveGap >= 12 || (wasBlunderBefore && onlyMoveGap >= 7))
+    moverWinBefore < 92 &&
+    (onlyMoveGap >= 14 || (wasBlunderBefore && onlyMoveGap >= 9))
   ) {
     return 'great'
   }
 
-  if (isTopChoice || winLoss <= 1.5) return 'best'
-  if (winLoss <= 3.8) return 'excellent'
-  if (winLoss <= 7.0) return 'good'
-  if (winLoss <= 12.5) return 'inaccuracy'
+  if (isTopChoice || winLoss <= 1.2) return 'best'
+  if (winLoss <= 3.5) return 'excellent'
+  if (winLoss <= 6.5) return 'good'
+  if (winLoss <= 12.0) return 'inaccuracy'
   if (winLoss <= 22.0) return 'mistake'
   return 'blunder'
 }
@@ -820,9 +864,29 @@ function roundTo50(value: number, min: number, max: number): number {
 }
 
 /**
+ * Converts a known rating from Lichess or Chess.com into the internal Chess.com baseline scale.
+ */
+function normalizeKnownEloToChessCom(
+  elo: number,
+  sourcePlatform: 'chesscom' | 'lichess' | 'unknown',
+): number {
+  if (sourcePlatform === 'lichess') {
+    const offset =
+      elo < 2450
+        ? 260 - ((Math.max(900, elo) - 900) / 1550) * 90
+        : Math.max(40, 170 - ((elo - 2450) / 500) * 130)
+    return Math.max(400, elo - offset)
+  }
+  return elo
+}
+
+/**
  * Estimates single-game performance Elo across Chess.com, Lichess, and FIDE scales.
- * Blends Lichess Volatility-Weighted Accuracy + Average Centipawn Loss (ACPL) +
- * game-length confidence shrinkage + time-control calibration (no double blunder penalty).
+ * Combines:
+ * 1. Lichess Volatility-Weighted Accuracy (60%) + Capped ACPL (40%)
+ * 2. Game-length confidence shrinkage
+ * 3. Time-control calibration (Bullet / Blitz / Rapid / Classical)
+ * 4. Chess.com-style Bayesian anchoring to actual player & opponent Elo (when available)
  */
 export function estimateCrossPlatformRatings(params: {
   accuracy: number
@@ -833,6 +897,9 @@ export function estimateCrossPlatformRatings(params: {
   brilliant: number
   great: number
   timeControl?: TimeControlCategory
+  playerRating?: number
+  opponentRating?: number
+  sourcePlatform?: 'chesscom' | 'lichess' | 'unknown'
 }): EstimatedRatings {
   const {
     accuracy,
@@ -841,16 +908,16 @@ export function estimateCrossPlatformRatings(params: {
     brilliant,
     great,
     timeControl = 'rapid',
+    playerRating,
+    opponentRating,
+    sourcePlatform = 'unknown',
   } = params
 
-  // 1. Accuracy-based Chess.com Rapid baseline (piecewise calibrated to real game stats):
-  //    50% -> ~650 | 65% -> ~1050 | 75% -> ~1380 | 82% -> ~1680 | 88% -> ~1980 | 93% -> ~2280 | 97% -> ~2550
+  // 1. Accuracy-based Chess.com Rapid baseline
   const accClamped = Math.max(20, Math.min(99.5, accuracy))
-  const eloFromAcc =
-    350 + Math.pow((accClamped - 20) / 80, 1.55) * 2350
+  const eloFromAcc = 350 + Math.pow((accClamped - 20) / 80, 1.55) * 2350
 
-  // 2. ACPL-based Chess.com Rapid baseline (empirical exponential mapping):
-  //    ACPL 10 -> ~2550 | 20 -> ~2250 | 35 -> ~1900 | 55 -> ~1550 | 85 -> ~1200 | 130 -> ~850
+  // 2. ACPL-based Chess.com Rapid baseline
   const acplClamped = Math.max(5, Math.min(250, acpl))
   const eloFromAcpl = 2780 * Math.exp(-0.0098 * acplClamped) + 220
 
@@ -860,11 +927,7 @@ export function estimateCrossPlatformRatings(params: {
     0.4 * eloFromAcpl +
     Math.min(90, brilliant * 45 + great * 20)
 
-  // 4. Shrink extreme ratings on very short games (< 14 non-book moves) toward 1400 prior
-  const confidence = Math.min(1, Math.max(0.35, evaluatedMoves / 14))
-  const stabilizedRapid = 1400 + (blendedBase - 1400) * confidence
-
-  // 5. Time-control specific shifts
+  // 4. Time-control specific shifts
   const tcConfig: Record<
     TimeControlCategory,
     { tcShift: number; lichessExtra: number; fideShift: number }
@@ -876,10 +939,41 @@ export function estimateCrossPlatformRatings(params: {
   }
 
   const cfg = tcConfig[timeControl]
-  const rawChessCom = Math.max(
+  const purePerfChessCom = Math.max(
     400,
-    Math.min(2800, stabilizedRapid + cfg.tcShift),
+    Math.min(2850, blendedBase + cfg.tcShift),
   )
+
+  // 5. Anchor to known player & opponent Elo (Chess.com Game Rating style)
+  //    If known: blend 52% match-anchored expectation + 48% pure accuracy/ACPL performance.
+  //    If unknown: shrink extreme short-game estimates toward 1400 prior.
+  let rawChessCom: number
+  if (playerRating || opponentRating) {
+    const normSelf = playerRating
+      ? normalizeKnownEloToChessCom(playerRating, sourcePlatform)
+      : undefined
+    const normOpp = opponentRating
+      ? normalizeKnownEloToChessCom(opponentRating, sourcePlatform)
+      : undefined
+    const matchAnchor =
+      normSelf && normOpp
+        ? 0.55 * normSelf + 0.45 * normOpp
+        : (normSelf ?? normOpp ?? 1400)
+
+    // Longer games give higher weight to pure accuracy performance; short games stay closer to anchor
+    const perfWeight = Math.min(0.55, Math.max(0.28, (evaluatedMoves / 24) * 0.55))
+    const anchored =
+      matchAnchor * (1 - perfWeight) + purePerfChessCom * perfWeight
+    // Cap unrealistic swing to ±450 from match anchor
+    rawChessCom = Math.max(
+      400,
+      Math.min(2900, Math.max(matchAnchor - 450, Math.min(matchAnchor + 450, anchored))),
+    )
+  } else {
+    const confidence = Math.min(1, Math.max(0.35, evaluatedMoves / 14))
+    const stabilizedRapid = 1400 + (blendedBase - 1400) * confidence
+    rawChessCom = Math.max(400, Math.min(2800, stabilizedRapid + cfg.tcShift))
+  }
 
   // Lichess Glicko-2 offset (+270 around 1000–1600, narrowing smoothly to ~+50 above 2500)
   const lichessOffset =
@@ -896,9 +990,9 @@ export function estimateCrossPlatformRatings(params: {
       : 1450 + (rawChessCom - 1400) * 0.91) + cfg.fideShift
 
   return {
-    fide: roundTo50(rawFide, 1000, 2800),
-    chesscom: roundTo50(rawChessCom, 400, 2800),
-    lichess: roundTo50(rawLichess, 800, 2900),
+    fide: roundTo50(rawFide, 1000, 2850),
+    chesscom: roundTo50(rawChessCom, 400, 2900),
+    lichess: roundTo50(rawLichess, 800, 2950),
   }
 }
 
@@ -1268,16 +1362,12 @@ export async function runFullGameReview(
     isCheckmate: boolean
     isDraw: boolean
     turn: 'w' | 'b'
-    whiteMat: number
-    blackMat: number
   }> = [
     {
       fen: chess.fen(),
       isCheckmate: chess.isCheckmate(),
       isDraw: chess.isDraw(),
       turn: chess.turn(),
-      whiteMat: getSideMaterial(chess, 'w'),
-      blackMat: getSideMaterial(chess, 'b'),
     },
   ]
 
@@ -1294,9 +1384,6 @@ export async function runFullGameReview(
   for (let idx = 0; idx < moves.length; idx++) {
     const m = moves[idx]
     const color = chess.turn()
-    const myMatBefore = getSideMaterial(chess, color)
-    const oppColor = color === 'w' ? 'b' : 'w'
-    const oppMatBefore = getSideMaterial(chess, oppColor)
 
     const executed = chess.move({
       from: m.from,
@@ -1304,18 +1391,15 @@ export async function runFullGameReview(
       promotion: m.promotion,
     })
 
-    // Detect tactical sacrifice: moved a non-pawn piece to a square attacked by opponent where opponent can capture for material gain
-    const oppReplies = chess.moves({ verbose: true })
-    const canCaptureMovedPiece = oppReplies.some(
-      (r) => r.to === executed.to && r.captured,
-    )
+    // True material sacrifice via Static Exchange Evaluation (SEE):
+    // Mover must actually lose >= 2 points of material on the destination square after optimal recaptures.
+    // Eliminates false positives on normal developing moves and equal trades.
     const pieceVal = MATERIAL_VALUE[executed.piece]
-    const capturedVal = executed.captured ? MATERIAL_VALUE[executed.captured] : 0
-    const myMatAfter = getSideMaterial(chess, color)
-    const oppMatAfter = getSideMaterial(chess, oppColor)
-    const netMatDiff = myMatAfter - oppMatAfter - (myMatBefore - oppMatBefore)
-    const isSacrifice =
-      pieceVal >= 3 && canCaptureMovedPiece && pieceVal > capturedVal + 1 && netMatDiff <= 0
+    const exchangeNet =
+      pieceVal >= 3 && !chess.isCheckmate()
+        ? computeExchangeNetForMover(chess.fen(), executed.to, executed.captured)
+        : 0
+    const isSacrifice = exchangeNet <= -2
 
     const moveNumber = startsBlack
       ? startMoveNum + Math.floor((idx + 1) / 2)
@@ -1336,8 +1420,6 @@ export async function runFullGameReview(
       isCheckmate: chess.isCheckmate(),
       isDraw: chess.isDraw(),
       turn: chess.turn(),
-      whiteMat: getSideMaterial(chess, 'w'),
-      blackMat: getSideMaterial(chess, 'b'),
     })
   }
 
