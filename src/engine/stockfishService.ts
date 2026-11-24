@@ -57,8 +57,12 @@ export class StockfishService {
   private isReady = false
   private isSearching = false
   private multiPv = 2
-  private pendingSearch: { fen: string; depth: number; multiPv: number } | null =
-    null
+  private pendingSearch: {
+    fen: string
+    positionCmd: string
+    depth: number
+    multiPv: number
+  } | null = null
   private currentFen: string | null = null
   private currentTurn: 'w' | 'b' = 'w'
   private lineMap = new Map<number, EngineLine>()
@@ -105,10 +109,20 @@ export class StockfishService {
     }
   }
 
-  public analyze(fen: string, depth = 12, multiPv = 2): void {
+  public analyze(
+    fen: string,
+    depth = 15,
+    multiPv = 3,
+    positionCmd?: string,
+  ): void {
     if (!this.worker) return
 
-    this.pendingSearch = { fen, depth, multiPv }
+    this.pendingSearch = {
+      fen,
+      positionCmd: positionCmd ?? `position fen ${fen}`,
+      depth,
+      multiPv,
+    }
 
     if (!this.isReady) {
       return
@@ -151,7 +165,7 @@ export class StockfishService {
 
   private runPendingSearch(): void {
     if (!this.pendingSearch || !this.worker) return
-    const { fen, depth, multiPv } = this.pendingSearch
+    const { fen, positionCmd, depth, multiPv } = this.pendingSearch
     this.pendingSearch = null
 
     if (multiPv !== this.multiPv) {
@@ -176,12 +190,13 @@ export class StockfishService {
     }
     this.emit()
 
-    this.send(`position fen ${fen}`)
+    this.send(positionCmd)
     this.send(`go depth ${depth}`)
   }
 
   private handleUciLine(line: string): void {
     if (line === 'uciok') {
+      this.send('setoption name Hash value 64')
       this.send(`setoption name MultiPV value ${this.multiPv}`)
       this.send('isready')
       return
@@ -201,8 +216,13 @@ export class StockfishService {
       return
     }
 
-    // Parse UCI search info: "info depth 15 seldepth 17 multipv 1 score cp 32 ... pv e2e4 e7e5"
-    if (line.startsWith('info ') && line.includes(' score ')) {
+    // Parse UCI search info: ignore aspiration bounds (upperbound/lowerbound) so bestMove & PV stay accurate
+    if (
+      line.startsWith('info ') &&
+      line.includes(' score ') &&
+      !line.includes('upperbound') &&
+      !line.includes('lowerbound')
+    ) {
       if (this.pendingSearch) return
 
       const depthMatch = line.match(/\bdepth\s+(\d+)/)

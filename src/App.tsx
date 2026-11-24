@@ -37,6 +37,7 @@ import { PlayerBar } from './components/PlayerBar'
 import {
   BOT_PRESETS,
   getStockfishBotMove,
+  resetStockfishBotCache,
   type BotPresetId,
 } from './engine/botService'
 import {
@@ -122,7 +123,7 @@ const DEFAULT_PLAYERS: PlayersState = {
   black: { name: 'Quân Đen' },
 }
 
-const ENGINE_DEPTH = 12
+const ENGINE_DEPTH = 15
 
 const ENGINE_MODES: Array<{ id: EngineMode; label: string; desc: string }> = [
   {
@@ -428,6 +429,7 @@ export function App() {
   // Multi-Engine state
   const [engineEnabled, setEngineEnabled] = useState<boolean>(true)
   const [engineMode, setEngineMode] = useState<EngineMode>('stockfish')
+  const [engineDepth, setEngineDepth] = useState<12 | 15 | 18 | 20>(ENGINE_DEPTH)
   const [showBestMoveArrow, setShowBestMoveArrow] = useState<boolean>(true)
   const [sfEvaluation, setSfEvaluation] =
     useState<EngineEvaluation>(INITIAL_EVALUATION)
@@ -772,12 +774,27 @@ export function App() {
         fen,
       }
       setSfEvalFen(fen)
-      const multiPv = engineMode === 'stockfish' ? 2 : 1
-      service.analyze(fen, ENGINE_DEPTH, multiPv)
+      const multiPv = engineMode === 'stockfish' ? 3 : 1
+      const activeMoves = variation
+        ? [
+            ...moves.slice(0, variation.branchPly),
+            ...variation.moves.slice(0, variation.cursor),
+          ]
+        : moves.slice(0, viewIndex)
+      const uciHistory = activeMoves.map(
+        (m) => `${m.from}${m.to}${m.promotion ?? ''}`,
+      )
+      const basePos =
+        startFen === DEFAULT_POSITION ? 'position startpos' : `position fen ${startFen}`
+      const positionCmd =
+        uciHistory.length > 0
+          ? `${basePos} moves ${uciHistory.join(' ')}`
+          : basePos
+      service.analyze(fen, engineDepth, multiPv, positionCmd)
     }, 45)
 
     return () => window.clearTimeout(timer)
-  }, [fen, needsStockfish, engineMode])
+  }, [fen, needsStockfish, engineMode, engineDepth, startFen, moves, viewIndex, variation])
 
   // Fetch Lichess Cloud Eval (depth 30-60+) when in 'cloud' mode
   useEffect(() => {
@@ -907,8 +924,12 @@ export function App() {
       } else {
         void getStockfishBotMove(
           fen,
-          activeBotPreset.skillLevel ?? 6,
-          activeBotPreset.depth ?? 6,
+          {
+            skillLevel: activeBotPreset.skillLevel,
+            uciElo: activeBotPreset.uciElo,
+            depth: activeBotPreset.depth ?? 10,
+            movetimeMs: activeBotPreset.movetimeMs,
+          },
           controller.signal,
         )
           .then(finishBotMove)
@@ -948,6 +969,7 @@ export function App() {
     }
 
     botAbortRef.current?.abort()
+    resetStockfishBotCache()
     clearReview()
     setVariation(null)
     setLiveMoveCtx(null)
@@ -3051,6 +3073,30 @@ export function App() {
                         {/* Stockfish 19 MultiPV lines */}
                         {engineMode === 'stockfish' && (
                           <div className="flex flex-col gap-1.5">
+                            <div className="mb-0.5 flex items-center justify-between gap-2">
+                              <span className="text-[11px] font-semibold text-stone-400">
+                                {isEn
+                                  ? 'Search Depth (Hash 64MB):'
+                                  : 'Độ sâu tính toán (Hash 64MB):'}
+                              </span>
+                              <div className="flex gap-1">
+                                {([12, 15, 18, 20] as const).map((d) => (
+                                  <button
+                                    key={d}
+                                    type="button"
+                                    onClick={() => setEngineDepth(d)}
+                                    className={[
+                                      'rounded px-2 py-0.5 font-mono text-[11px] font-bold transition',
+                                      engineDepth === d
+                                        ? 'bg-[#81b64c] text-[#161512]'
+                                        : 'bg-[#2a2824] text-stone-400 hover:text-stone-200',
+                                    ].join(' ')}
+                                  >
+                                    d{d}
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
                             {sfEvaluation.lines.length === 0 ? (
                               <span className="text-xs text-stone-400">
                                 {sfEvaluation.isReady

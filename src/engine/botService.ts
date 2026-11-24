@@ -18,7 +18,9 @@ export interface BotPreset {
   desc: string
   maiaElo?: number
   skillLevel?: number
+  uciElo?: number
   depth?: number
+  movetimeMs?: number
 }
 
 export const BOT_PRESETS: BotPreset[] = [
@@ -66,57 +68,86 @@ export const BOT_PRESETS: BotPreset[] = [
     id: 'sf-1000',
     engine: 'stockfish',
     name: 'Stockfish Dễ',
-    eloLabel: '~1000',
-    desc: 'Skill 1 • Depth 4',
-    skillLevel: 1,
-    depth: 4,
+    eloLabel: '~1100',
+    desc: 'Skill 2 • Depth 6 • Dễ làm quen',
+    skillLevel: 2,
+    depth: 6,
+    movetimeMs: 400,
   },
   {
     id: 'sf-1500',
     engine: 'stockfish',
     name: 'Stockfish Trung bình',
     eloLabel: '~1500',
-    desc: 'Skill 6 • Depth 6',
-    skillLevel: 6,
-    depth: 6,
+    desc: 'UCI Elo 1500 • Depth 10',
+    uciElo: 1500,
+    depth: 10,
+    movetimeMs: 600,
   },
   {
     id: 'sf-2000',
     engine: 'stockfish',
     name: 'Stockfish Khá',
     eloLabel: '~2000',
-    desc: 'Skill 12 • Depth 10',
-    skillLevel: 12,
-    depth: 10,
+    desc: 'UCI Elo 2000 • Depth 13',
+    uciElo: 2000,
+    depth: 13,
+    movetimeMs: 900,
   },
   {
     id: 'sf-2600',
     engine: 'stockfish',
     name: 'Stockfish GM',
     eloLabel: '~2600',
-    desc: 'Skill 18 • Depth 14',
-    skillLevel: 18,
-    depth: 14,
+    desc: 'UCI Elo 2600 • Depth 16 • Hash 64MB',
+    uciElo: 2600,
+    depth: 16,
+    movetimeMs: 1300,
   },
   {
     id: 'sf-max',
     engine: 'stockfish',
     name: 'Stockfish Tối đa',
     eloLabel: '3600+',
-    desc: 'Skill 20 • Depth 16',
+    desc: 'Full Strength • Depth 18 • Hash 64MB',
     skillLevel: 20,
-    depth: 16,
+    depth: 18,
+    movetimeMs: 1800,
   },
 ]
 
+// Persistent Stockfish Bot Worker so Hash/Transposition Table is preserved across moves
+let sharedBotWorker: Worker | null = null
+let sharedBotReady = false
+
+function ensureBotWorker(): Worker {
+  if (!sharedBotWorker) {
+    sharedBotWorker = new Worker(
+      `${import.meta.env.BASE_URL}stockfish/stockfish-19-lite-single.js`,
+    )
+    sharedBotReady = false
+  }
+  return sharedBotWorker
+}
+
+export function resetStockfishBotCache(): void {
+  if (sharedBotWorker && sharedBotReady) {
+    sharedBotWorker.postMessage('ucinewgame')
+  }
+}
+
 /**
- * Computes a single Stockfish Bot move on a dedicated lightweight Web Worker
- * using UCI `Skill Level` and `depth` so it never conflicts with the analysis engine.
+ * Computes a high-quality Stockfish Bot move on a persistent Web Worker
+ * with 64MB Hash table and official UCI_LimitStrength / UCI_Elo calibration.
  */
 export function getStockfishBotMove(
   fen: string,
-  skillLevel: number,
-  depth: number,
+  options: {
+    skillLevel?: number
+    uciElo?: number
+    depth: number
+    movetimeMs?: number
+  },
   signal: AbortSignal,
 ): Promise<string | null> {
   return new Promise((resolve, reject) => {
@@ -125,42 +156,57 @@ export function getStockfishBotMove(
       return
     }
 
-    const worker = new Worker(
-      `${import.meta.env.BASE_URL}stockfish/stockfish-19-lite-single.js`,
-    )
+    const worker = ensureBotWorker()
+    const movetime = options.movetimeMs ?? 1000
+
+    const configureAndSearch = () => {
+      worker.postMessage('setoption name Hash value 64')
+      worker.postMessage('setoption name MultiPV value 1')
+      if (options.uciElo !== undefined) {
+        worker.postMessage('setoption name UCI_LimitStrength value true')
+        worker.postMessage(`setoption name UCI_Elo value ${options.uciElo}`)
+      } else {
+        worker.postMessage('setoption name UCI_LimitStrength value false')
+        worker.postMessage(
+          `setoption name Skill Level value ${options.skillLevel ?? 20}`,
+        )
+      }
+      worker.postMessage('isready')
+    }
 
     const cleanup = () => {
       signal.removeEventListener('abort', onAbort)
-      worker.postMessage('quit')
-      worker.terminate()
+      worker.removeEventListener('message', onMessage)
+      worker.removeEventListener('error', onError)
     }
 
     const onAbort = () => {
+      worker.postMessage('stop')
       cleanup()
       reject(new DOMException('Aborted', 'AbortError'))
     }
 
-    signal.addEventListener('abort', onAbort)
-
-    worker.onerror = (err) => {
+    const onError = (err: ErrorEvent) => {
       cleanup()
+      sharedBotWorker?.terminate()
+      sharedBotWorker = null
+      sharedBotReady = false
       reject(new Error(err.message || 'Stockfish Bot lỗi.'))
     }
 
-    worker.onmessage = (event: MessageEvent<string>) => {
+    const onMessage = (event: MessageEvent<string>) => {
       const line = typeof event.data === 'string' ? event.data.trim() : ''
       if (!line) return
 
       if (line === 'uciok') {
-        worker.postMessage(`setoption name Skill Level value ${skillLevel}`)
-        worker.postMessage('setoption name MultiPV value 1')
-        worker.postMessage('isready')
+        sharedBotReady = true
+        configureAndSearch()
         return
       }
 
       if (line === 'readyok') {
         worker.postMessage(`position fen ${fen}`)
-        worker.postMessage(`go depth ${depth}`)
+        worker.postMessage(`go depth ${options.depth} movetime ${movetime}`)
         return
       }
 
@@ -172,6 +218,14 @@ export function getStockfishBotMove(
       }
     }
 
-    worker.postMessage('uci')
+    signal.addEventListener('abort', onAbort)
+    worker.addEventListener('message', onMessage)
+    worker.addEventListener('error', onError)
+
+    if (sharedBotReady) {
+      configureAndSearch()
+    } else {
+      worker.postMessage('uci')
+    }
   })
 }
