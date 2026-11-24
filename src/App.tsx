@@ -53,7 +53,7 @@ import {
   getMaterialSummary,
   type BoardThemeId,
 } from './utils/boardThemes'
-import { chessSounds } from './utils/chessSounds'
+import { chessSounds, getSoundForSan } from './utils/chessSounds'
 import {
   fetchOnlinePlayerProfile,
   type OnlineGameSummary,
@@ -458,8 +458,9 @@ export function App() {
       engineMode === 'compare' ||
       (liveMoveCtx !== null && liveMoveCtx.fenAfter === fen))
 
-  // Lifecycle: start Stockfish 19 Worker & Maia-3 ONNX Worker once
+  // Lifecycle: preload sounds + start Stockfish 19 Worker & Maia-3 ONNX Worker once
   useEffect(() => {
+    chessSounds.preloadAll()
     const service = new StockfishService()
     engineRef.current = service
     service.start((nextEval) => {
@@ -932,14 +933,28 @@ export function App() {
           if (variation.cursor <= 1) {
             setViewIndex(variation.branchPly)
             setVariation(null)
+            if (soundEnabled) {
+              chessSounds.play(
+                variation.branchPly > 0
+                  ? getSoundForSan(moves[variation.branchPly - 1]?.san)
+                  : 'move',
+              )
+            }
           } else {
-            setVariation({ ...variation, cursor: variation.cursor - 1 })
+            const nextCursor = variation.cursor - 1
+            setVariation({ ...variation, cursor: nextCursor })
+            if (soundEnabled) {
+              chessSounds.play(getSoundForSan(variation.moves[nextCursor - 1]?.san))
+            }
           }
-          if (soundEnabled) chessSounds.play('move')
         } else {
           setViewIndex((prev) => {
             const next = Math.max(0, prev - 1)
-            if (next !== prev && soundEnabled) chessSounds.play('move')
+            if (next !== prev && soundEnabled) {
+              chessSounds.play(
+                next > 0 ? getSoundForSan(moves[next - 1]?.san) : 'move',
+              )
+            }
             return next
           })
         }
@@ -950,13 +965,18 @@ export function App() {
         e.preventDefault()
         if (variation) {
           if (variation.cursor < variation.moves.length) {
-            setVariation({ ...variation, cursor: variation.cursor + 1 })
-            if (soundEnabled) chessSounds.play('move')
+            const nextCursor = variation.cursor + 1
+            setVariation({ ...variation, cursor: nextCursor })
+            if (soundEnabled) {
+              chessSounds.play(getSoundForSan(variation.moves[nextCursor - 1]?.san))
+            }
           }
         } else {
           setViewIndex((prev) => {
             const next = Math.min(moves.length, prev + 1)
-            if (next !== prev && soundEnabled) chessSounds.play('move')
+            if (next !== prev && soundEnabled) {
+              chessSounds.play(getSoundForSan(moves[next - 1]?.san))
+            }
             return next
           })
         }
@@ -983,11 +1003,17 @@ export function App() {
         if (variation) {
           if (variation.cursor !== variation.moves.length) {
             setVariation({ ...variation, cursor: variation.moves.length })
-            if (soundEnabled) chessSounds.play('move')
+            if (soundEnabled) {
+              chessSounds.play(
+                getSoundForSan(variation.moves[variation.moves.length - 1]?.san),
+              )
+            }
           }
         } else {
           setViewIndex((prev) => {
-            if (prev !== moves.length && soundEnabled) chessSounds.play('move')
+            if (prev !== moves.length && soundEnabled) {
+              chessSounds.play(getSoundForSan(moves[moves.length - 1]?.san))
+            }
             return moves.length
           })
         }
@@ -999,7 +1025,7 @@ export function App() {
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [importModalTab, moves.length, soundEnabled, variation])
+  }, [importModalTab, moves, soundEnabled, variation])
 
   const cancelReview = () => {
     reviewAbortRef.current?.abort()
@@ -1449,7 +1475,9 @@ export function App() {
   const jumpToPly = (ply: number) => {
     const clamped = Math.max(0, Math.min(moves.length, ply))
     if ((clamped !== viewIndex || variation !== null) && soundEnabled) {
-      chessSounds.play('move')
+      chessSounds.play(
+        clamped > 0 ? getSoundForSan(moves[clamped - 1]?.san) : 'move',
+      )
     }
     setVariation(null)
     setViewIndex(clamped)
@@ -1464,7 +1492,13 @@ export function App() {
     setVariation(null)
     setSelectedSquare(null)
     setPendingPromotion(null)
-    if (soundEnabled) chessSounds.play('move')
+    if (soundEnabled) {
+      chessSounds.play(
+        variation.branchPly > 0
+          ? getSoundForSan(moves[variation.branchPly - 1]?.san)
+          : 'move',
+      )
+    }
   }
 
   const stepPrev = () => {
@@ -1472,8 +1506,11 @@ export function App() {
       if (variation.cursor <= 1) {
         exitVariation()
       } else {
-        setVariation({ ...variation, cursor: variation.cursor - 1 })
-        if (soundEnabled) chessSounds.play('move')
+        const nextCursor = variation.cursor - 1
+        setVariation({ ...variation, cursor: nextCursor })
+        if (soundEnabled) {
+          chessSounds.play(getSoundForSan(variation.moves[nextCursor - 1]?.san))
+        }
       }
       return
     }
@@ -1483,8 +1520,11 @@ export function App() {
   const stepNext = () => {
     if (variation) {
       if (variation.cursor < variation.moves.length) {
-        setVariation({ ...variation, cursor: variation.cursor + 1 })
-        if (soundEnabled) chessSounds.play('move')
+        const nextCursor = variation.cursor + 1
+        setVariation({ ...variation, cursor: nextCursor })
+        if (soundEnabled) {
+          chessSounds.play(getSoundForSan(variation.moves[nextCursor - 1]?.san))
+        }
       }
       return
     }
@@ -1503,7 +1543,11 @@ export function App() {
     if (variation) {
       if (variation.cursor < variation.moves.length) {
         setVariation({ ...variation, cursor: variation.moves.length })
-        if (soundEnabled) chessSounds.play('move')
+        if (soundEnabled) {
+          chessSounds.play(
+            getSoundForSan(variation.moves[variation.moves.length - 1]?.san),
+          )
+        }
       }
       return
     }

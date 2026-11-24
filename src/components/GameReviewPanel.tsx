@@ -54,6 +54,8 @@ export function GameReviewPanel({
   const tcMeta = TIME_CONTROL_META[timeControl]
   const whiteRatings = estimateCrossPlatformRatings({
     accuracy: review.white.accuracy,
+    acpl: review.white.acpl,
+    evaluatedMoves: review.white.evaluatedMoves,
     blunder: review.white.blunder,
     mistake: review.white.mistake,
     brilliant: review.white.brilliant,
@@ -62,6 +64,8 @@ export function GameReviewPanel({
   })
   const blackRatings = estimateCrossPlatformRatings({
     accuracy: review.black.accuracy,
+    acpl: review.black.acpl,
+    evaluatedMoves: review.black.evaluatedMoves,
     blunder: review.black.blunder,
     mistake: review.black.mistake,
     brilliant: review.black.brilliant,
@@ -160,9 +164,38 @@ export function GameReviewPanel({
                     {currentMeta.label}
                   </span>
                 </div>
-                <p className="mt-1.5 text-xs leading-relaxed text-stone-300">
+                <p className="mt-1.5 text-xs leading-relaxed text-stone-200">
                   {currentMove.commentary}
                 </p>
+                {(isSuboptimal && currentMove.refutationLine) ||
+                (isSuboptimal && currentMove.recommendedLine) ? (
+                  <div className="mt-2 flex flex-col gap-1 rounded-lg bg-[#161512] px-2.5 py-1.5 font-mono text-[11px] ring-1 ring-white/[0.06]">
+                    {currentMove.refutationLine && (
+                      <div className="truncate text-red-300">
+                        <span className="font-sans text-[10px] font-semibold text-stone-400">
+                          Đối thủ phản công:{' '}
+                        </span>
+                        {currentMove.refutationLine}
+                      </div>
+                    )}
+                    {currentMove.recommendedLine && (
+                      <div className="truncate text-[#b4e07c]">
+                        <span className="font-sans text-[10px] font-semibold text-stone-400">
+                          Nhánh tốt hơn:{' '}
+                        </span>
+                        {currentMove.recommendedLine}
+                      </div>
+                    )}
+                  </div>
+                ) : currentMove.classification === 'brilliant' &&
+                  currentMove.refutationLine ? (
+                  <div className="mt-2 truncate rounded-lg bg-[#161512] px-2.5 py-1.5 font-mono text-[11px] text-[#1baca6] ring-1 ring-[#1baca6]/30">
+                    <span className="font-sans text-[10px] font-semibold text-stone-400">
+                      Diễn biến tiếp:{' '}
+                    </span>
+                    {currentMove.refutationLine}
+                  </div>
+                ) : null}
               </>
             ) : (
               <>
@@ -290,7 +323,9 @@ export function GameReviewPanel({
             <div className="mt-1 text-2xl font-black text-white">
               {review.white.accuracy}%
             </div>
-            <div className="text-[10px] text-stone-400">Độ chính xác</div>
+            <div className="mt-0.5 font-mono text-[10px] text-stone-400">
+              ACPL {review.white.acpl}
+            </div>
           </div>
 
           <span className="text-[11px] font-bold tracking-wider text-stone-500 uppercase">
@@ -304,7 +339,9 @@ export function GameReviewPanel({
             <div className="mt-1 text-2xl font-black text-white">
               {review.black.accuracy}%
             </div>
-            <div className="text-[10px] text-stone-400">Độ chính xác</div>
+            <div className="mt-0.5 font-mono text-[10px] text-stone-400">
+              ACPL {review.black.acpl}
+            </div>
           </div>
         </div>
 
