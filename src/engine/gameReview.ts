@@ -475,18 +475,29 @@ export function classifyLiveMove(params: {
 
   let liveLegalCount = 20
   let liveWasInCheck = false
+  let liveIsSacrifice = false
+  let liveMovedPiece: PieceSymbol = 'p'
   let fenAfter = params.fenBefore
   try {
     const temp = new Chess()
     temp.load(params.fenBefore)
     liveLegalCount = temp.moves().length
     liveWasInCheck = temp.inCheck()
-    temp.move({
+    const executed = temp.move({
       from: params.uci.slice(0, 2) as Square,
       to: params.uci.slice(2, 4) as Square,
       promotion: (params.uci[4] as PieceSymbol | undefined) ?? undefined,
     })
     fenAfter = temp.fen()
+    liveMovedPiece = executed.piece
+    if (executed.piece !== 'k' && MATERIAL_VALUE[executed.piece] >= 3 && !temp.isCheckmate()) {
+      const net = computeExchangeNetForMover(
+        fenAfter,
+        executed.to,
+        executed.captured,
+      )
+      liveIsSacrifice = net <= -2
+    }
   } catch {
     // Fallback to defaults
   }
@@ -514,14 +525,14 @@ export function classifyLiveMove(params: {
         : params.color === 'w'
           ? params.after.mate
           : -params.after.mate,
-    isSacrifice: false,
+    isSacrifice: liveIsSacrifice,
     isCheckmate: params.isCheckmate,
     legalMoveCount: liveLegalCount,
     wasInCheckBefore: liveWasInCheck,
     isImmediateRecapture: false,
     isObviousFreeCapture: false,
     isPromotion: Boolean(params.uci[4]),
-    movedPiece: 'p',
+    movedPiece: liveMovedPiece,
   })
 
   const bestMoveBeforeSan = uciToSanSafe(
@@ -661,23 +672,20 @@ function classifyMove(params: {
     isPromotion ||
     (wasInCheckBefore && movedPiece === 'k')
 
-  // 4. Brilliant (!!): strict Chess.com criteria:
-  // True SEE piece sacrifice (<= -2), top move, non-obvious, NOT already crushing,
-  // and clearly required (MultiPV gap >= 12% or unlocks a new forced mate).
-  const unlocksNewMate =
-    mateAfterForMover !== null &&
-    mateAfterForMover > 0 &&
-    (mateBeforeForMover === null || mateBeforeForMover <= 0)
+  // 4. Brilliant (!!): a genuine piece sacrifice (SEE <= -2) that does NOT lose your
+  // advantage on the evaluation bar (maintains or improves eval, or forces checkmate).
+  const forcesMate = mateAfterForMover !== null && mateAfterForMover > 0
+  const keepsAdvantage =
+    isTopChoice || (winLoss <= 2.0 && cpLoss <= 35)
 
   if (
     isSacrifice &&
     !isForcedOrObvious &&
     !isObviousFreeCapture &&
-    (isTopChoice || winLoss <= 0.6) &&
-    ply >= 8 &&
-    moverWinBefore <= 78 &&
-    moverWinAfter >= 50 &&
-    (onlyMoveGap >= 12 || unlocksNewMate)
+    keepsAdvantage &&
+    ply >= 6 &&
+    moverWinAfter >= 48 &&
+    (moverWinBefore <= 88 || forcesMate)
   ) {
     return 'brilliant'
   }
@@ -697,28 +705,34 @@ function classifyMove(params: {
     return 'great'
   }
 
-  // 6. Friendly, Chess.com-aligned Win% (Expected Points) classification
-  if (isTopChoice || winLoss <= 1.2) return 'best'
-  if (winLoss <= 3.0) return 'excellent'
-  if (winLoss <= 6.0) return 'good'
+  // 6. Authoritative Chess.com Expected Points V2 + Lichess Win% classification
+  // Official Chess.com EP thresholds: Best (<=0.8%), Excellent (<=2%), Good (<=5%),
+  // Inaccuracy (<=10%), Mistake (<=20%), Blunder (>20% & major eval drop >=3.0 / collapse).
+  if (isTopChoice || winLoss <= 0.8) return 'best'
+  if (winLoss <= 2.0) return 'excellent'
+  if (winLoss <= 5.0) return 'good'
 
-  // Safeguard: never label a move Mistake/Blunder if you remain clearly winning (+3.5+)
-  // or were already clearly lost (-4.0 or worse) without walking into a new forced mate.
+  // Safeguard: never label Mistake/Blunder when remaining clearly winning (+3.5+)
+  // or already clearly lost (-4.0 or worse) without walking into a new forced mate.
   if (moverWinAfter >= 85) return 'good'
   if (moverWinAfter >= 78 || moverWinBefore <= 18) return 'inaccuracy'
 
-  // Miss (Bỏ lỡ cơ hội): had a clearly winning chance (>= 68%) and missed it,
-  // but the position is still equal or better (>= 44%) rather than collapsing to lost.
-  if (moverWinBefore >= 68 && moverWinAfter >= 44 && winLoss >= 14.0) {
+  // Miss (×): missed a major winning opportunity (e.g. opponent's blunder / winning tactic)
+  // while keeping the position equal or playable (>= 45%) rather than collapsing to lost.
+  if (moverWinBefore >= 68 && moverWinAfter >= 45 && winLoss >= 15.0) {
     return 'miss'
   }
 
-  // True Blunder: drops >= 3.0 points (300 cp) on the evaluation bar into a losing position (< 44%)
-  if (cpLoss >= 300 && moverWinAfter < 44) {
+  // Blunder (??): severe error collapsing into a losing position (< 45%)
+  // with either >= 3.0 points (300 cp) eval drop + >20% EP loss, or massive >28% EP collapse.
+  if (
+    moverWinAfter < 45 &&
+    ((winLoss > 20.0 && cpLoss >= 300) || winLoss > 28.0)
+  ) {
     return 'blunder'
   }
 
-  if (winLoss > 12.0) return 'mistake'
+  if (winLoss > 10.0) return 'mistake'
   return 'inaccuracy'
 }
 
@@ -1310,13 +1324,17 @@ function computeLichessAccuracy(
     const m = allMoves[i]
     if (m.color !== color) continue
 
-    const acc = Math.max(
-      0,
-      Math.min(
-        100,
-        103.1668 * Math.exp(-0.04354 * Math.max(0, m.winLoss)) - 3.1669,
-      ),
-    )
+    // Official Lichess AccuracyPercent.scala formula (with +1 uncertainty bonus)
+    const acc =
+      m.winLoss <= 0
+        ? 100
+        : Math.max(
+            0,
+            Math.min(
+              100,
+              103.1668 * Math.exp(-0.04354 * m.winLoss) - 3.1669 + 1,
+            ),
+          )
 
     // Sliding window standard deviation of win% = position volatility weight
     const startIdx = Math.max(0, i + 1 - windowSize)
@@ -1438,13 +1456,17 @@ function computePhaseStats(
   let mistakes = 0
 
   for (const m of phaseMoves) {
-    const acc = Math.max(
-      0,
-      Math.min(
-        100,
-        103.1668 * Math.exp(-0.04354 * Math.max(0, m.winLoss)) - 3.1669,
-      ),
-    )
+    // Official Lichess AccuracyPercent.scala formula (with +1 uncertainty bonus)
+    const acc =
+      m.winLoss <= 0
+        ? 100
+        : Math.max(
+            0,
+            Math.min(
+              100,
+              103.1668 * Math.exp(-0.04354 * m.winLoss) - 3.1669 + 1,
+            ),
+          )
     accSum += acc
     if (m.classification === 'blunder') blunders += 1
     else if (m.classification === 'mistake') mistakes += 1
@@ -1596,10 +1618,43 @@ interface PositionEval {
   secondMate?: number | null
 }
 
+const MAX_EVAL_CACHE = 500
+const fenEvalCache = new Map<string, PositionEval>()
+
+function normalizeFenKey(fen: string): string {
+  return fen.split(' ').slice(0, 4).join(' ')
+}
+
+const DEFAULT_START_KEY = normalizeFenKey(DEFAULT_POSITION)
+const DEFAULT_START_EVAL: PositionEval = {
+  cp: 30,
+  mate: null,
+  bestMove: 'e2e4',
+  pv: ['e2e4', 'e7e5', 'g1f3', 'b8c6'],
+  secondCp: 25,
+  secondMate: null,
+}
+
+function getCachedEval(depth: number, fen: string): PositionEval | undefined {
+  const key = normalizeFenKey(fen)
+  if (key === DEFAULT_START_KEY) return DEFAULT_START_EVAL
+  return fenEvalCache.get(`${depth}:${key}`)
+}
+
+function setCachedEval(depth: number, fen: string, value: PositionEval): void {
+  const key = `${depth}:${normalizeFenKey(fen)}`
+  if (fenEvalCache.size >= MAX_EVAL_CACHE) {
+    const oldest = fenEvalCache.keys().next().value
+    if (oldest !== undefined) fenEvalCache.delete(oldest)
+  }
+  fenEvalCache.set(key, value)
+}
+
 function evaluateSingleFen(
   worker: Worker,
   fen: string,
   depth: number,
+  movetimeMs: number,
   signal: AbortSignal,
 ): Promise<PositionEval> {
   return new Promise((resolve, reject) => {
@@ -1705,7 +1760,7 @@ function evaluateSingleFen(
     signal.addEventListener('abort', onAbort)
     worker.addEventListener('message', onMessage)
     worker.postMessage(`position fen ${fen}`)
-    worker.postMessage(`go depth ${depth}`)
+    worker.postMessage(`go depth ${depth} movetime ${movetimeMs}`)
   })
 }
 
@@ -1724,6 +1779,7 @@ function waitForReady(worker: Worker, signal: AbortSignal): Promise<void> {
     const onMessage = (event: MessageEvent<string>) => {
       const line = typeof event.data === 'string' ? event.data.trim() : ''
       if (line === 'uciok') {
+        worker.postMessage('setoption name Hash value 32')
         worker.postMessage('setoption name MultiPV value 2')
         worker.postMessage('isready')
       } else if (line === 'readyok') {
@@ -1983,88 +2039,168 @@ export async function runFullGameReview(
   const useCloudHybrid = engineId === 'stockfish-cloud'
   const sfDepth =
     engineId === 'stockfish-16' ? 16 : useCloudHybrid ? 14 : 12
+  const sfMovetimeMs =
+    engineId === 'stockfish-16' ? 1100 : useCloudHybrid ? 700 : 450
 
-  const worker = isMaia
-    ? new Worker(new URL('./maiaWorker.ts', import.meta.url), {
-        type: 'module',
-      })
-    : new Worker(
-        `${import.meta.env.BASE_URL}stockfish/stockfish-19-lite-single.js`,
-      )
+  const total = snapshots.length
+  const evals: Array<PositionEval | null> = new Array(total).fill(null)
+  let completedCount = 0
+  const workers: Worker[] = []
+
+  const reportProgress = () => {
+    completedCount += 1
+    onProgress?.(completedCount, total)
+  }
 
   try {
     if (isMaia) {
-      await waitForMaiaReady(worker, signal)
-    } else {
-      await waitForReady(worker, signal)
-    }
+      const maiaWorker = new Worker(
+        new URL('./maiaWorker.ts', import.meta.url),
+        { type: 'module' },
+      )
+      workers.push(maiaWorker)
+      await waitForMaiaReady(maiaWorker, signal)
 
-    const evals: PositionEval[] = []
-    const total = snapshots.length
-    let cloudMissStreak = 0
-
-    for (let i = 0; i < total; i++) {
-      if (signal.aborted) {
-        throw new DOMException('Aborted', 'AbortError')
+      for (let i = 0; i < total; i++) {
+        if (signal.aborted) throw new DOMException('Aborted', 'AbortError')
+        const snap = snapshots[i]
+        if (snap.isCheckmate) {
+          evals[i] = { cp: null, mate: snap.turn === 'w' ? -1 : 1, bestMove: null }
+        } else if (snap.isDraw) {
+          evals[i] = { cp: 0, mate: null, bestMove: null }
+        } else {
+          evals[i] = await evaluateWithMaiaWorker(
+            maiaWorker,
+            i + 1,
+            snap.fen,
+            1500,
+            signal,
+          )
+        }
+        reportProgress()
       }
-
-      const snap = snapshots[i]
-      if (snap.isCheckmate) {
-        evals.push({
-          cp: null,
-          mate: snap.turn === 'w' ? -1 : 1,
-          bestMove: null,
-        })
-      } else if (snap.isDraw) {
-        evals.push({ cp: 0, mate: null, bestMove: null })
-      } else if (isMaia) {
-        const res = await evaluateWithMaiaWorker(
-          worker,
-          i + 1,
-          snap.fen,
-          1500,
-          signal,
-        )
-        evals.push(res)
-      } else {
-        let resolved: PositionEval | null = null
-        // For Hybrid mode, query Lichess Cloud Eval (depth 30-60+, MultiPV 2) while still in theory
-        if (useCloudHybrid && cloudMissStreak < 2) {
-          try {
-            const cloud = await fetchLichessCloudEval(snap.fen, 2, signal)
-            if (cloud && cloud.lines[0]) {
-              cloudMissStreak = 0
-              resolved = {
-                cp: cloud.lines[0].cp,
-                mate: cloud.lines[0].mate,
-                bestMove: cloud.lines[0].moves[0] ?? null,
-                pv: cloud.lines[0].moves.slice(0, 6),
-                secondCp: cloud.lines[1]?.cp ?? null,
-                secondMate: cloud.lines[1]?.mate ?? null,
-              }
-            } else {
-              cloudMissStreak += 1
-            }
-          } catch {
-            cloudMissStreak += 1
+    } else {
+      // Pass 1: Instant resolution for checkmates, draws, start position & cached FENs
+      const pendingIndices: number[] = []
+      for (let i = 0; i < total; i++) {
+        const snap = snapshots[i]
+        if (snap.isCheckmate) {
+          evals[i] = { cp: null, mate: snap.turn === 'w' ? -1 : 1, bestMove: null }
+          reportProgress()
+        } else if (snap.isDraw) {
+          evals[i] = { cp: 0, mate: null, bestMove: null }
+          reportProgress()
+        } else {
+          const cached = getCachedEval(sfDepth, snap.fen)
+          if (cached) {
+            evals[i] = cached
+            reportProgress()
+          } else {
+            pendingIndices.push(i)
           }
         }
-
-        if (!resolved) {
-          resolved = await evaluateSingleFen(worker, snap.fen, sfDepth, signal)
-        }
-        evals.push(resolved)
       }
 
-      onProgress?.(i + 1, total)
+      // Pass 2: In Hybrid mode, query Lichess Cloud Eval for opening theory first
+      const sfQueue: number[] = []
+      if (useCloudHybrid && pendingIndices.length > 0) {
+        let cloudMissStreak = 0
+        for (const idx of pendingIndices) {
+          if (signal.aborted) throw new DOMException('Aborted', 'AbortError')
+          if (cloudMissStreak < 2) {
+            try {
+              const cloud = await fetchLichessCloudEval(
+                snapshots[idx].fen,
+                2,
+                signal,
+              )
+              if (cloud && cloud.lines[0]) {
+                cloudMissStreak = 0
+                const res: PositionEval = {
+                  cp: cloud.lines[0].cp,
+                  mate: cloud.lines[0].mate,
+                  bestMove: cloud.lines[0].moves[0] ?? null,
+                  pv: cloud.lines[0].moves.slice(0, 6),
+                  secondCp: cloud.lines[1]?.cp ?? null,
+                  secondMate: cloud.lines[1]?.mate ?? null,
+                }
+                evals[idx] = res
+                setCachedEval(sfDepth, snapshots[idx].fen, res)
+                reportProgress()
+                continue
+              }
+              cloudMissStreak += 1
+            } catch {
+              cloudMissStreak += 1
+            }
+          }
+          sfQueue.push(idx)
+        }
+      } else {
+        sfQueue.push(...pendingIndices)
+      }
+
+      // Pass 3: Parallel Stockfish 19 WASM Worker Pool (up to 4 concurrent workers)
+      // Splits work into contiguous chunks so each worker still benefits from TT/Hash reuse!
+      if (sfQueue.length > 0) {
+        const hwCores =
+          typeof navigator !== 'undefined' && navigator.hardwareConcurrency
+            ? navigator.hardwareConcurrency
+            : 4
+        const poolSize = Math.min(4, Math.max(1, hwCores - 1), sfQueue.length)
+        const sfUrl = `${import.meta.env.BASE_URL}stockfish/stockfish-19-lite-single.js`
+
+        for (let w = 0; w < poolSize; w++) {
+          workers.push(new Worker(sfUrl))
+        }
+        await Promise.all(workers.map((w) => waitForReady(w, signal)))
+
+        const chunkSize = Math.ceil(sfQueue.length / poolSize)
+        await Promise.all(
+          workers.map(async (w, workerIdx) => {
+            const chunk = sfQueue.slice(
+              workerIdx * chunkSize,
+              (workerIdx + 1) * chunkSize,
+            )
+            for (const idx of chunk) {
+              if (signal.aborted) {
+                throw new DOMException('Aborted', 'AbortError')
+              }
+              const snap = snapshots[idx]
+              const cached = getCachedEval(sfDepth, snap.fen)
+              if (cached) {
+                evals[idx] = cached
+                reportProgress()
+                continue
+              }
+              const res = await evaluateSingleFen(
+                w,
+                snap.fen,
+                sfDepth,
+                sfMovetimeMs,
+                signal,
+              )
+              evals[idx] = res
+              setCachedEval(sfDepth, snap.fen, res)
+              reportProgress()
+            }
+          }),
+        )
+      }
     }
 
-    const startWinPercent = evalToWhiteWinPercent(evals[0].cp, evals[0].mate)
+    const resolvedEvals: PositionEval[] = evals.map(
+      (e) => e ?? { cp: 0, mate: null, bestMove: null },
+    )
+    const startWinPercent = evalToWhiteWinPercent(
+      resolvedEvals[0].cp,
+      resolvedEvals[0].mate,
+    )
     const reviewedMoves: ReviewMoveInfo[] = []
 
     for (let i = 0; i < moveMeta.length; i++) {
-      const before = evals[i]
-      const after = evals[i + 1]
+      const before = resolvedEvals[i]
+      const after = resolvedEvals[i + 1]
       const meta = moveMeta[i]
       const snapAfter = snapshots[i + 1]
 
@@ -2199,9 +2335,15 @@ export async function runFullGameReview(
       black: blackSummary,
     }
   } finally {
-    if (!isMaia) {
-      worker.postMessage('quit')
+    for (const w of workers) {
+      if (!isMaia) {
+        try {
+          w.postMessage('quit')
+        } catch {
+          // Ignore postMessage errors during teardown
+        }
+      }
+      w.terminate()
     }
-    worker.terminate()
   }
 }

@@ -1,3 +1,4 @@
+import { memo } from 'react'
 import {
   CLASSIFICATION_META,
   type GameReviewResult,
@@ -12,7 +13,7 @@ interface WinRateGraphProps {
   onSelectPly: (ply: number) => void
 }
 
-export function WinRateGraph({
+export const WinRateGraph = memo(function WinRateGraph({
   lang = 'vi',
   review,
   currentPly,
@@ -188,4 +189,4 @@ export function WinRateGraph({
       </div>
     </div>
   )
-}
+})

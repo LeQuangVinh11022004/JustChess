@@ -63,6 +63,8 @@ export class StockfishService {
   private currentTurn: 'w' | 'b' = 'w'
   private lineMap = new Map<number, EngineLine>()
   private currentEval: EngineEvaluation = { ...INITIAL_EVALUATION }
+  private lastEmitMs = 0
+  private emitTimer: number | null = null
 
   public start(onUpdate: EvalListener): void {
     this.listener = onUpdate
@@ -130,6 +132,10 @@ export class StockfishService {
   public destroy(): void {
     this.pendingSearch = null
     this.listener = null
+    if (this.emitTimer !== null) {
+      window.clearTimeout(this.emitTimer)
+      this.emitTimer = null
+    }
     if (this.worker) {
       this.send('quit')
       this.worker.terminate()
@@ -245,7 +251,7 @@ export class StockfishService {
         bestMove: topLine?.pv[0] ?? this.currentEval.bestMove,
         isSearching: true,
       }
-      this.emit()
+      this.emitThrottled()
       return
     }
 
@@ -272,7 +278,27 @@ export class StockfishService {
     }
   }
 
+  private emitThrottled(): void {
+    const now = performance.now()
+    const elapsed = now - this.lastEmitMs
+    if (elapsed >= 80) {
+      this.emit()
+      return
+    }
+    if (this.emitTimer === null) {
+      this.emitTimer = window.setTimeout(() => {
+        this.emitTimer = null
+        this.emit()
+      }, 80 - elapsed)
+    }
+  }
+
   private emit(): void {
+    if (this.emitTimer !== null) {
+      window.clearTimeout(this.emitTimer)
+      this.emitTimer = null
+    }
+    this.lastEmitMs = performance.now()
     this.listener?.({ ...this.currentEval })
   }
 }

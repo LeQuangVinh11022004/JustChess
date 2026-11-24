@@ -315,22 +315,101 @@ function playSoundForMove(executed: Move, nextGame: Chess): void {
   chessSounds.play('move')
 }
 
+const SESSION_STORAGE_KEY = 'justchess-session-v1'
+
+interface SavedSession {
+  startFen: string
+  moves: StoredMove[]
+  viewIndex: number
+  players: PlayersState
+  gameMeta: string | null
+  sourcePlatform: 'chesscom' | 'lichess' | 'unknown'
+  pgnResult: GameOutcome
+  orientation: 'w' | 'b'
+  themeId: BoardThemeId
+  soundEnabled: boolean
+  sidebarTab: SidebarTab
+  reviewEngine: ReviewEngineId
+  timeControl: TimeControlCategory
+  reviewResult: GameReviewResult | null
+}
+
+function loadSavedSession(): Partial<SavedSession> {
+  if (typeof window === 'undefined') return {}
+  try {
+    const raw = window.localStorage.getItem(SESSION_STORAGE_KEY)
+    if (!raw) return {}
+    const parsed = JSON.parse(raw) as Partial<SavedSession>
+    if (!parsed || typeof parsed !== 'object') return {}
+
+    // Verify startFen & moves are legally replayable so corrupt cache never crashes the app
+    const safeStartFen =
+      typeof parsed.startFen === 'string' && parsed.startFen.trim().length > 0
+        ? parsed.startFen
+        : DEFAULT_POSITION
+    const safeMoves = Array.isArray(parsed.moves) ? parsed.moves : []
+    buildGameAtPly(safeStartFen, safeMoves, safeMoves.length)
+
+    const safeViewIndex =
+      typeof parsed.viewIndex === 'number'
+        ? Math.max(0, Math.min(safeMoves.length, parsed.viewIndex))
+        : safeMoves.length
+
+    const safeReview =
+      parsed.reviewResult &&
+      Array.isArray(parsed.reviewResult.moves) &&
+      parsed.reviewResult.moves.length === safeMoves.length
+        ? parsed.reviewResult
+        : null
+
+    return {
+      ...parsed,
+      startFen: safeStartFen,
+      moves: safeMoves,
+      viewIndex: safeViewIndex,
+      reviewResult: safeReview,
+    }
+  } catch {
+    return {}
+  }
+}
+
+const INITIAL_SESSION = loadSavedSession()
+
 export function App() {
-  const [startFen, setStartFen] = useState<string>(DEFAULT_POSITION)
-  const [moves, setMoves] = useState<StoredMove[]>([])
-  const [viewIndex, setViewIndex] = useState<number>(0)
+  const [startFen, setStartFen] = useState<string>(
+    INITIAL_SESSION.startFen ?? DEFAULT_POSITION,
+  )
+  const [moves, setMoves] = useState<StoredMove[]>(INITIAL_SESSION.moves ?? [])
+  const [viewIndex, setViewIndex] = useState<number>(
+    INITIAL_SESSION.viewIndex ?? 0,
+  )
   const [variation, setVariation] = useState<VariationBranch | null>(null)
-  const [players, setPlayers] = useState<PlayersState>(DEFAULT_PLAYERS)
-  const [gameMeta, setGameMeta] = useState<string | null>(null)
+  const [players, setPlayers] = useState<PlayersState>(
+    INITIAL_SESSION.players ?? DEFAULT_PLAYERS,
+  )
+  const [gameMeta, setGameMeta] = useState<string | null>(
+    INITIAL_SESSION.gameMeta ?? null,
+  )
   const [sourcePlatform, setSourcePlatform] = useState<
     'chesscom' | 'lichess' | 'unknown'
-  >('unknown')
-  const [pgnResult, setPgnResult] = useState<GameOutcome>(null)
+  >(INITIAL_SESSION.sourcePlatform ?? 'unknown')
+  const [pgnResult, setPgnResult] = useState<GameOutcome>(
+    INITIAL_SESSION.pgnResult ?? null,
+  )
 
   const [selectedSquare, setSelectedSquare] = useState<Square | null>(null)
-  const [orientation, setOrientation] = useState<'w' | 'b'>('w')
-  const [themeId, setThemeId] = useState<BoardThemeId>('chesscom')
-  const [soundEnabled, setSoundEnabled] = useState<boolean>(true)
+  const [orientation, setOrientation] = useState<'w' | 'b'>(
+    INITIAL_SESSION.orientation ?? 'w',
+  )
+  const [themeId, setThemeId] = useState<BoardThemeId>(
+    INITIAL_SESSION.themeId && INITIAL_SESSION.themeId in BOARD_THEMES
+      ? INITIAL_SESSION.themeId
+      : 'chesscom',
+  )
+  const [soundEnabled, setSoundEnabled] = useState<boolean>(
+    INITIAL_SESSION.soundEnabled ?? true,
+  )
   const [pendingPromotion, setPendingPromotion] =
     useState<PendingPromotion | null>(null)
   const [importModalTab, setImportModalTab] = useState<ImportTab | null>(null)
@@ -414,13 +493,18 @@ export function App() {
   const botMaiaReqIdRef = useRef<number | null>(null)
 
   // Full Game Review state (Chess.com-style Coach, Scorecard, Badges & Win-Rate Graph)
-  const [sidebarTab, setSidebarTab] = useState<SidebarTab>('game')
-  const [reviewEngine, setReviewEngine] =
-    useState<ReviewEngineId>('stockfish-12')
-  const [timeControl, setTimeControl] = useState<TimeControlCategory>('rapid')
+  const [sidebarTab, setSidebarTab] = useState<SidebarTab>(
+    INITIAL_SESSION.sidebarTab ?? 'game',
+  )
+  const [reviewEngine, setReviewEngine] = useState<ReviewEngineId>(
+    INITIAL_SESSION.reviewEngine ?? 'stockfish-12',
+  )
+  const [timeControl, setTimeControl] = useState<TimeControlCategory>(
+    INITIAL_SESSION.timeControl ?? 'rapid',
+  )
   const [showBestMoveHint, setShowBestMoveHint] = useState<boolean>(false)
   const [reviewResult, setReviewResult] = useState<GameReviewResult | null>(
-    null,
+    INITIAL_SESSION.reviewResult ?? null,
   )
   const [reviewProgress, setReviewProgress] = useState<{
     completed: number
@@ -428,6 +512,52 @@ export function App() {
   } | null>(null)
   const [reviewError, setReviewError] = useState<string | null>(null)
   const reviewAbortRef = useRef<AbortController | null>(null)
+
+  // Auto-save active game, PGN/FEN, review result & preferences to localStorage
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      try {
+        const payload: SavedSession = {
+          startFen,
+          moves,
+          viewIndex,
+          players,
+          gameMeta,
+          sourcePlatform,
+          pgnResult,
+          orientation,
+          themeId,
+          soundEnabled,
+          sidebarTab,
+          reviewEngine,
+          timeControl,
+          reviewResult,
+        }
+        window.localStorage.setItem(
+          SESSION_STORAGE_KEY,
+          JSON.stringify(payload),
+        )
+      } catch {
+        // Ignore quota / private browsing errors
+      }
+    }, 150)
+    return () => window.clearTimeout(timer)
+  }, [
+    startFen,
+    moves,
+    viewIndex,
+    players,
+    gameMeta,
+    sourcePlatform,
+    pgnResult,
+    orientation,
+    themeId,
+    soundEnabled,
+    sidebarTab,
+    reviewEngine,
+    timeControl,
+    reviewResult,
+  ])
 
   const activeMoveRef = useRef<HTMLButtonElement>(null)
   const moveListContainerRef = useRef<HTMLDivElement>(null)
@@ -533,11 +663,12 @@ export function App() {
   const needsStockfish =
     engineEnabled &&
     !isGameOver &&
+    reviewProgress === null &&
     (engineMode === 'stockfish' ||
       engineMode === 'compare' ||
       (liveMoveCtx !== null && liveMoveCtx.fenAfter === fen))
 
-  // Lifecycle: preload sounds + start Stockfish 19 Worker & Maia-3 ONNX Worker once
+  // Lifecycle: preload sounds + start Stockfish 19 Worker once (Maia Worker is lazy-loaded on demand)
   useEffect(() => {
     chessSounds.preloadAll()
     const service = new StockfishService()
@@ -552,6 +683,25 @@ export function App() {
       }
     })
 
+    return () => {
+      service.destroy()
+      engineRef.current = null
+      maiaWorkerRef.current?.terminate()
+      maiaWorkerRef.current = null
+      reviewAbortRef.current?.abort()
+      botAbortRef.current?.abort()
+    }
+  }, [])
+
+  // Lazy-start Maia-3 ONNX Worker ONLY when the user visits Bots tab or selects Maia/Compare mode
+  const needsMaiaWorker =
+    sidebarTab === 'bot' ||
+    engineMode === 'maia' ||
+    engineMode === 'compare' ||
+    (botActive && botPresetId.startsWith('maia'))
+
+  useEffect(() => {
+    if (!needsMaiaWorker || maiaWorkerRef.current) return
     const maiaWorker = new Worker(
       new URL('./engine/maiaWorker.ts', import.meta.url),
       { type: 'module' },
@@ -572,12 +722,14 @@ export function App() {
           botMaiaReqIdRef.current = null
           const cb = botMaiaCallbackRef.current
           botMaiaCallbackRef.current = null
-          // Sample slightly among top human moves for natural variety, preferring top choice
           const top = msg.data.topMoves
           let chosen = msg.data.bestMove
           if (top.length >= 2) {
             const r = Math.random()
-            if (r > top[0].probability && r <= top[0].probability + top[1].probability) {
+            if (
+              r > top[0].probability &&
+              r <= top[0].probability + top[1].probability
+            ) {
               chosen = top[1].uci
             }
           }
@@ -602,16 +754,7 @@ export function App() {
     const initMsg: MaiaWorkerRequest = { type: 'init' }
     maiaWorker.postMessage(initMsg)
     maiaWorkerRef.current = maiaWorker
-
-    return () => {
-      service.destroy()
-      engineRef.current = null
-      maiaWorker.terminate()
-      maiaWorkerRef.current = null
-      reviewAbortRef.current?.abort()
-      botAbortRef.current?.abort()
-    }
-  }, [])
+  }, [needsMaiaWorker])
 
   // Trigger Stockfish analysis when needed (short debounce keeps rapid PGN scrubbing smooth)
   useEffect(() => {
@@ -1165,12 +1308,17 @@ export function App() {
     setReviewProgress({ completed: 0, total: targetMoves.length + 1 })
 
     try {
+      let lastProgressUiMs = 0
       const result = await runFullGameReview(targetStartFen, targetMoves, {
         engineId,
         lang,
         signal: controller.signal,
         onProgress: (completed, total) => {
-          setReviewProgress({ completed, total })
+          const now = performance.now()
+          if (completed >= total || now - lastProgressUiMs >= 65) {
+            lastProgressUiMs = now
+            setReviewProgress({ completed, total })
+          }
         },
       })
       if (!controller.signal.aborted) {

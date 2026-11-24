@@ -1,5 +1,5 @@
 import type { PieceSymbol, Square } from 'chess.js'
-import { useEffect, useRef, useState } from 'react'
+import { memo, useEffect, useRef, useState } from 'react'
 import type { BoardTheme } from '../utils/boardThemes'
 import { ChessPiece } from './ChessPiece'
 
@@ -235,7 +235,7 @@ function renderArrowShape(
   )
 }
 
-export function ChessBoard({
+export const ChessBoard = memo(function ChessBoard({
   board,
   fenKey,
   turn,
@@ -769,4 +769,4 @@ export function ChessBoard({
       )}
     </div>
   )
-}
+})
