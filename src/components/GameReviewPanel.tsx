@@ -160,27 +160,6 @@ export function GameReviewPanel({
                   >
                     {currentMeta.label}
                   </span>
-                  {currentMove.runningElo && (
-                    <span
-                      title="Elo hiệu suất tích lũy sau nước đi này"
-                      className="ml-auto flex items-center gap-1 rounded bg-[#2a2824] px-1.5 py-0.5 font-mono text-[10px] font-bold text-stone-300 ring-1 ring-white/5"
-                    >
-                      <span>~{currentMove.runningElo}</span>
-                      {currentMove.ratingDelta !== undefined &&
-                        currentMove.ratingDelta !== 0 && (
-                          <span
-                            className={
-                              currentMove.ratingDelta > 0
-                                ? 'text-[#a3d160]'
-                                : 'text-red-400'
-                            }
-                          >
-                            ({currentMove.ratingDelta > 0 ? '+' : ''}
-                            {currentMove.ratingDelta})
-                          </span>
-                        )}
-                    </span>
-                  )}
                 </div>
                 <p className="mt-1.5 text-xs leading-relaxed text-stone-200">
                   {currentMove.commentary}

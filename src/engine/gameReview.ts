@@ -166,10 +166,6 @@ export interface ReviewMoveInfo {
   /** Human-readable SAN line of engine's recommended continuation instead of this move */
   recommendedLine?: string
   winLoss: number
-  /** Running objective Game Rating (Chess.com scale) of the mover right after this move */
-  runningElo?: number
-  /** How much this specific move shifted the mover's running Game Rating (+/- Elo) */
-  ratingDelta?: number
   phase: GamePhase
   classification: MoveClassification
   commentary: string
@@ -356,7 +352,7 @@ const MATERIAL_VALUE: Record<PieceSymbol, number> = {
   b: 3,
   r: 5,
   q: 9,
-  k: 0,
+  k: 100,
 }
 
 /**
@@ -491,7 +487,12 @@ export function classifyLiveMove(params: {
           : -params.after.mate,
     isSacrifice: false,
     isCheckmate: params.isCheckmate,
-    wasBlunderBefore: false,
+    legalMoveCount: 20,
+    wasInCheckBefore: false,
+    isImmediateRecapture: false,
+    isObviousFreeCapture: false,
+    isPromotion: Boolean(params.uci[4]),
+    movedPiece: 'p',
   })
 
   const bestMoveBeforeSan = uciToSanSafe(
@@ -557,7 +558,12 @@ function classifyMove(params: {
   mateAfterForMover: number | null
   isSacrifice: boolean
   isCheckmate: boolean
-  wasBlunderBefore: boolean
+  legalMoveCount: number
+  wasInCheckBefore: boolean
+  isImmediateRecapture: boolean
+  isObviousFreeCapture: boolean
+  isPromotion: boolean
+  movedPiece: PieceSymbol
 }): MoveClassification {
   const {
     ply,
@@ -573,14 +579,19 @@ function classifyMove(params: {
     mateAfterForMover,
     isSacrifice,
     isCheckmate,
-    wasBlunderBefore,
+    legalMoveCount,
+    wasInCheckBefore,
+    isImmediateRecapture,
+    isObviousFreeCapture,
+    isPromotion,
+    movedPiece,
   } = params
 
   const isTopChoice = Boolean(bestMoveBefore && uci === bestMoveBefore)
 
   if (isCheckmate) return 'best'
 
-  // Walking directly into a forced checkmate when position was not already mated
+  // 1. Walking directly into a forced checkmate when position was not already mated
   if (
     mateAfterForMover !== null &&
     mateAfterForMover < 0 &&
@@ -589,17 +600,18 @@ function classifyMove(params: {
     return 'blunder'
   }
 
-  // Throwing away a forced mate into a non-winning position
+  // 2. Throwing away a forced mate
   if (
     mateBeforeForMover !== null &&
     mateBeforeForMover > 0 &&
-    mateAfterForMover === null &&
-    moverWinAfter < 75
+    mateAfterForMover === null
   ) {
-    return 'blunder'
+    if (moverWinAfter < 75) return 'blunder'
+    if (moverWinAfter < 88) return 'mistake'
+    return 'inaccuracy'
   }
 
-  // Opening book heuristic: standard opening plies with tight accuracy & balanced eval
+  // 3. Opening book heuristic: standard opening plies with tight accuracy & balanced eval
   if (
     isStandardStart &&
     ply <= 10 &&
@@ -611,8 +623,16 @@ function classifyMove(params: {
     return 'book'
   }
 
-  // Brilliant (!!): strict Chess.com criteria:
-  // True SEE sacrifice (<= -2), top move, non-trivial position, unlocks mate or sharp gap
+  // Disqualify routine / forced / obvious moves from Brilliant (!!) and Great (!)
+  const isForcedOrObvious =
+    legalMoveCount <= 2 ||
+    isImmediateRecapture ||
+    isPromotion ||
+    (wasInCheckBefore && movedPiece === 'k')
+
+  // 4. Brilliant (!!): strict Chess.com criteria:
+  // True SEE piece sacrifice (<= -2), top move, non-obvious, NOT already crushing,
+  // and clearly required (MultiPV gap >= 12% or unlocks a new forced mate).
   const unlocksNewMate =
     mateAfterForMover !== null &&
     mateAfterForMover > 0 &&
@@ -620,33 +640,53 @@ function classifyMove(params: {
 
   if (
     isSacrifice &&
-    (isTopChoice || (winLoss <= 0.8 && cpLoss <= 15)) &&
-    ply >= 6 &&
-    moverWinAfter >= 48 &&
-    (moverWinBefore < 88 || unlocksNewMate) &&
-    (onlyMoveGap >= 5 || unlocksNewMate)
+    !isForcedOrObvious &&
+    !isObviousFreeCapture &&
+    (isTopChoice || winLoss <= 0.6) &&
+    ply >= 8 &&
+    moverWinBefore <= 78 &&
+    moverWinAfter >= 50 &&
+    (onlyMoveGap >= 12 || unlocksNewMate)
   ) {
     return 'brilliant'
   }
 
-  // Great (!): genuine "only move" (MultiPV1 vs MultiPV2 gap >= 14% win chance)
+  // 5. Great (!): genuine non-obvious "only move" (MultiPV1 vs MultiPV2 gap >= 18% win chance).
+  // Never awarded for recaptures, taking hanging/free pieces, promotions, king escapes, or already-won/lost positions.
   if (
     isTopChoice &&
-    winLoss <= 0.8 &&
-    ply >= 6 &&
-    moverWinBefore < 92 &&
-    (onlyMoveGap >= 14 || (wasBlunderBefore && onlyMoveGap >= 9))
+    winLoss <= 0.6 &&
+    !isForcedOrObvious &&
+    !isObviousFreeCapture &&
+    ply >= 8 &&
+    moverWinBefore < 82 &&
+    moverWinAfter >= 35 &&
+    onlyMoveGap >= 18
   ) {
     return 'great'
   }
 
-  // Strict Tournament Coach thresholds combining win% loss AND centipawn loss
-  if (isTopChoice || (winLoss <= 0.6 && cpLoss <= 12)) return 'best'
-  if (winLoss <= 2.0 && cpLoss <= 35) return 'excellent'
-  if (winLoss <= 4.2 && cpLoss <= 65) return 'good'
-  if (winLoss <= 8.5 && cpLoss <= 130) return 'inaccuracy'
-  if (winLoss <= 15.0 && cpLoss <= 240) return 'mistake'
-  return 'blunder'
+  // 6. Position-aware Win% (Expected Points) classification
+  // Pure winLoss naturally scales with position context (no false blunders on +8 -> +5.5!)
+  if (isTopChoice || winLoss <= 0.8) return 'best'
+  if (winLoss <= 2.2) return 'excellent'
+  if (winLoss <= 4.5) return 'good'
+
+  // Safeguard: never label a move Mistake/Blunder if you remain overwhelmingly winning (+5.0+)
+  // or were already completely lost (-5.5 or worse) without walking into a new forced mate.
+  if (moverWinAfter >= 90) return 'good'
+  if (moverWinAfter >= 84 || moverWinBefore <= 12) return 'inaccuracy'
+
+  // Outcome-flip strictness: throwing away a clearly winning position to equal/worse,
+  // or collapsing from equal to clearly lost is always a Blunder.
+  const threwWinningGame = moverWinBefore >= 70 && moverWinAfter <= 54
+  const collapsedFromEqual = moverWinBefore >= 45 && moverWinAfter <= 32
+  if (threwWinningGame || collapsedFromEqual || winLoss > 13.5) {
+    return 'blunder'
+  }
+
+  if (winLoss > 8.0) return 'mistake'
+  return 'inaccuracy'
 }
 
 const PIECE_NAME_VI: Record<PieceSymbol, string> = {
@@ -969,73 +1009,46 @@ function toCrossPlatformFromChessCom(
 }
 
 /**
- * Purely objective single-game performance Elo (Chess.com scale) computed strictly
- * from the actual move quality played in THIS game — zero anchoring to profile Elo
- * and zero artificial pull toward 1400.
+ * Purely objective overall match performance Elo (Chess.com scale) computed cleanly
+ * from overall Accuracy, ACPL, time control, and match result — no artificial per-move
+ * +/- bonuses or penalties based on move labels, and no anchoring to profile Elo.
  */
 function computeRawChessComPerf(params: {
   accuracy: number
   acpl?: number
-  totalMoves?: number
-  inaccuracy?: number
-  blunder: number
-  mistake: number
-  brilliant: number
-  great: number
   timeControl?: TimeControlCategory
   sideResult?: 'win' | 'loss' | 'draw' | 'unknown'
 }): number {
   const {
     accuracy,
     acpl = Math.max(8, Math.round((100 - accuracy) * 2.4)),
-    totalMoves = 25,
-    inaccuracy = 0,
-    blunder,
-    mistake,
-    brilliant,
-    great,
     timeControl = 'rapid',
     sideResult = 'unknown',
   } = params
 
-  // 1. Accuracy -> Elo curve (strict coaching calibration)
+  // 1. Overall Accuracy -> Elo curve (smooth monotonic calibration across 300–2800)
   const accClamped = Math.max(20, Math.min(99.5, accuracy))
-  const eloFromAcc = 280 + Math.pow((accClamped - 20) / 80, 1.65) * 2480
+  const eloFromAcc = 250 + Math.pow((accClamped - 20) / 80, 1.82) * 2550
 
-  // 2. ACPL -> Elo curve (stricter decay on centipawn loss)
+  // 2. Overall ACPL -> Elo curve
   const acplClamped = Math.max(4, Math.min(260, acpl))
-  const eloFromAcpl = 2860 * Math.exp(-0.0128 * acplClamped) + 120
+  const eloFromAcpl = 2850 * Math.exp(-0.0145 * acplClamped) + 100
 
-  // 3. Stricter error rate penalty (Blunders, Mistakes, AND Inaccuracies all impact Game Rating!)
-  const safeMoves = Math.max(6, totalMoves)
-  const blunderRate = blunder / safeMoves
-  const mistakeRate = mistake / safeMoves
-  const inaccRate = inaccuracy / safeMoves
-  const errorPenalty = Math.min(
-    420,
-    blunderRate * 1250 + mistakeRate * 480 + inaccRate * 180,
-  )
-
-  // 4. Genuine tactical brilliance & precision bonus
-  const tacticalBonus = Math.min(130, brilliant * 65 + great * 30)
-
-  // 5. Time-control calibration
+  // 3. Time-control calibration
   const tcShiftMap: Record<TimeControlCategory, number> = {
-    bullet: 160,
-    blitz: 80,
+    bullet: 150,
+    blitz: 75,
     rapid: 0,
-    classical: -90,
+    classical: -80,
   }
 
-  // 6. Small objective result adjustment
+  // 4. Small objective match-result adjustment
   const resultNudge =
-    sideResult === 'win' ? 75 : sideResult === 'loss' ? -75 : 0
+    sideResult === 'win' ? 65 : sideResult === 'loss' ? -65 : 0
 
   const objectiveElo =
     0.55 * eloFromAcc +
-    0.45 * eloFromAcpl -
-    errorPenalty +
-    tacticalBonus +
+    0.45 * eloFromAcpl +
     tcShiftMap[timeControl] +
     resultNudge
 
@@ -1048,12 +1061,6 @@ function computeRawChessComPerf(params: {
 export function estimateCrossPlatformRatings(params: {
   accuracy: number
   acpl?: number
-  totalMoves?: number
-  inaccuracy?: number
-  blunder: number
-  mistake: number
-  brilliant: number
-  great: number
   timeControl?: TimeControlCategory
   sideResult?: 'win' | 'loss' | 'draw' | 'unknown'
 }): EstimatedRatings {
@@ -1091,36 +1098,9 @@ export function estimateMatchRatings(params: {
           ? 'draw'
           : 'unknown'
 
-  const whiteTotalMoves =
-    white.brilliant +
-    white.great +
-    white.best +
-    white.excellent +
-    white.good +
-    white.book +
-    white.inaccuracy +
-    white.mistake +
-    white.blunder
-  const blackTotalMoves =
-    black.brilliant +
-    black.great +
-    black.best +
-    black.excellent +
-    black.good +
-    black.book +
-    black.inaccuracy +
-    black.mistake +
-    black.blunder
-
   let wRaw = computeRawChessComPerf({
     accuracy: white.accuracy,
     acpl: white.acpl,
-    totalMoves: whiteTotalMoves,
-    inaccuracy: white.inaccuracy,
-    blunder: white.blunder,
-    mistake: white.mistake,
-    brilliant: white.brilliant,
-    great: white.great,
     timeControl,
     sideResult: whiteSideResult,
   })
@@ -1128,12 +1108,6 @@ export function estimateMatchRatings(params: {
   let bRaw = computeRawChessComPerf({
     accuracy: black.accuracy,
     acpl: black.acpl,
-    totalMoves: blackTotalMoves,
-    inaccuracy: black.inaccuracy,
-    blunder: black.blunder,
-    mistake: black.mistake,
-    brilliant: black.brilliant,
-    great: black.great,
     timeControl,
     sideResult: blackSideResult,
   })
@@ -1436,12 +1410,6 @@ function computeSideSummary(
   summary.ratings = estimateCrossPlatformRatings({
     accuracy,
     acpl,
-    totalMoves: sideMoves.length,
-    inaccuracy: summary.inaccuracy,
-    blunder: summary.blunder,
-    mistake: summary.mistake,
-    brilliant: summary.brilliant,
-    great: summary.great,
   })
   summary.estimatedRating = summary.ratings.chesscom
 
@@ -1721,6 +1689,12 @@ export async function runFullGameReview(
     moveNumber: number
     phase: GamePhase
     isSacrifice: boolean
+    legalMoveCount: number
+    wasInCheckBefore: boolean
+    isImmediateRecapture: boolean
+    isObviousFreeCapture: boolean
+    isPromotion: boolean
+    movedPiece: PieceSymbol
   }> = []
 
   let currentPhase: GamePhase = isStandardStart
@@ -1732,6 +1706,8 @@ export async function runFullGameReview(
     middlegameStartPly: null,
     endgameStartPly: null,
   }
+
+  let prevCapturedSquare: Square | null = null
 
   for (let idx = 0; idx < moves.length; idx++) {
     const m = moves[idx]
@@ -1756,6 +1732,11 @@ export async function runFullGameReview(
       phaseRanges.endgameStartPly = plyNum
     }
 
+    const wasInCheckBefore = chess.inCheck()
+    const legalMoveCount = chess.moves().length
+    const isImmediateRecapture =
+      prevCapturedSquare !== null && m.to === prevCapturedSquare
+
     const executed = chess.move({
       from: m.from,
       to: m.to,
@@ -1764,13 +1745,20 @@ export async function runFullGameReview(
 
     // True material sacrifice via Static Exchange Evaluation (SEE):
     // Mover must actually lose >= 2 points of material on the destination square after optimal recaptures.
-    // Eliminates false positives on normal developing moves and equal trades.
+    // Also detect obvious free captures (taking a hanging piece with zero risk).
     const pieceVal = MATERIAL_VALUE[executed.piece]
-    const exchangeNet =
-      pieceVal >= 3 && !chess.isCheckmate()
-        ? computeExchangeNetForMover(chess.fen(), executed.to, executed.captured)
-        : 0
-    const isSacrifice = exchangeNet <= -2
+    const exchangeNet = !chess.isCheckmate()
+      ? computeExchangeNetForMover(chess.fen(), executed.to, executed.captured)
+      : 0
+    const isSacrifice =
+      executed.piece !== 'k' && pieceVal >= 3 && exchangeNet <= -2
+    const isObviousFreeCapture = Boolean(
+      executed.captured &&
+        exchangeNet >= MATERIAL_VALUE[executed.captured] &&
+        MATERIAL_VALUE[executed.captured] >= 1,
+    )
+
+    prevCapturedSquare = executed.captured ? executed.to : null
 
     moveMeta.push({
       uci: `${m.from}${m.to}${m.promotion ?? ''}`,
@@ -1781,6 +1769,12 @@ export async function runFullGameReview(
       moveNumber,
       phase: currentPhase,
       isSacrifice,
+      legalMoveCount,
+      wasInCheckBefore,
+      isImmediateRecapture,
+      isObviousFreeCapture,
+      isPromotion: Boolean(executed.promotion),
+      movedPiece: executed.piece,
     })
 
     snapshots.push({
@@ -1923,11 +1917,6 @@ export async function runFullGameReview(
             ? after.mate
             : -after.mate
 
-      const prevReviewed = i > 0 ? reviewedMoves[i - 1] : null
-      const wasBlunderBefore =
-        prevReviewed?.classification === 'blunder' ||
-        prevReviewed?.classification === 'mistake'
-
       const classification = classifyMove({
         ply: i + 1,
         isStandardStart,
@@ -1943,7 +1932,12 @@ export async function runFullGameReview(
         mateAfterForMover,
         isSacrifice: meta.isSacrifice,
         isCheckmate: snapAfter.isCheckmate,
-        wasBlunderBefore,
+        legalMoveCount: meta.legalMoveCount,
+        wasInCheckBefore: meta.wasInCheckBefore,
+        isImmediateRecapture: meta.isImmediateRecapture,
+        isObviousFreeCapture: meta.isObviousFreeCapture,
+        isPromotion: meta.isPromotion,
+        movedPiece: meta.movedPiece,
       })
 
       const bestMoveBeforeSan = uciToSanSafe(
@@ -1994,25 +1988,6 @@ export async function runFullGameReview(
         classification,
         commentary,
       })
-    }
-
-    // Compute running objective Game Rating & per-move Elo delta for every ply
-    // so players immediately see how each good/bad move shifted their performance rating!
-    let prevWhiteElo: number | null = null
-    let prevBlackElo: number | null = null
-    for (let i = 0; i < reviewedMoves.length; i++) {
-      const m = reviewedMoves[i]
-      const prefix = reviewedMoves.slice(0, i + 1)
-      const sideSummary = computeSideSummary(prefix, startWinPercent, m.color)
-      const runningElo = sideSummary.ratings.chesscom
-
-      const prevElo = m.color === 'w' ? prevWhiteElo : prevBlackElo
-      const ratingDelta = prevElo !== null ? runningElo - prevElo : 0
-      m.runningElo = runningElo
-      m.ratingDelta = ratingDelta
-
-      if (m.color === 'w') prevWhiteElo = runningElo
-      else prevBlackElo = runningElo
     }
 
     const whiteSummary = computeSideSummary(reviewedMoves, startWinPercent, 'w')
