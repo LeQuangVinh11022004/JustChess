@@ -73,6 +73,12 @@ import {
 } from './utils/boardThemes'
 import { chessSounds, getSoundForSan } from './utils/chessSounds'
 import {
+  CLASSIFICATION_LABEL,
+  getInitialLanguage,
+  saveLanguage,
+  type Language,
+} from './utils/i18n'
+import {
   fetchOnlinePlayerProfile,
   type OnlineGameSummary,
 } from './utils/onlineGamesApi'
@@ -116,7 +122,7 @@ const DEFAULT_PLAYERS: PlayersState = {
   black: { name: 'Quân Đen' },
 }
 
-const ENGINE_DEPTH = 15
+const ENGINE_DEPTH = 12
 
 const ENGINE_MODES: Array<{ id: EngineMode; label: string; desc: string }> = [
   {
@@ -164,25 +170,64 @@ function buildGameAtPly(
 
 function getGameStatus(
   game: Chess,
+  lang: Language = 'vi',
 ): { text: string; tone: 'normal' | 'check' | 'over' } {
+  const isEn = lang === 'en'
   if (game.isCheckmate()) {
-    const winner = game.turn() === 'w' ? 'Đen' : 'Trắng'
-    return { text: `Chiếu hết • Quân ${winner} thắng`, tone: 'over' }
+    const winner =
+      game.turn() === 'w'
+        ? isEn
+          ? 'Black'
+          : 'Đen'
+        : isEn
+          ? 'White'
+          : 'Trắng'
+    return {
+      text: isEn
+        ? `Checkmate • ${winner} wins`
+        : `Chiếu hết • Quân ${winner} thắng`,
+      tone: 'over',
+    }
   }
-  if (game.isStalemate()) return { text: 'Hòa cờ • Stalemate', tone: 'over' }
+  if (game.isStalemate()) {
+    return { text: isEn ? 'Draw • Stalemate' : 'Hòa cờ • Stalemate', tone: 'over' }
+  }
   if (game.isThreefoldRepetition()) {
-    return { text: 'Hòa cờ • Lặp nước 3 lần', tone: 'over' }
+    return {
+      text: isEn ? 'Draw • Threefold Repetition' : 'Hòa cờ • Lặp nước 3 lần',
+      tone: 'over',
+    }
   }
   if (game.isInsufficientMaterial()) {
-    return { text: 'Hòa cờ • Không đủ lực lượng', tone: 'over' }
+    return {
+      text: isEn
+        ? 'Draw • Insufficient Material'
+        : 'Hòa cờ • Không đủ lực lượng',
+      tone: 'over',
+    }
   }
-  if (game.isDraw()) return { text: 'Hòa cờ', tone: 'over' }
+  if (game.isDraw()) return { text: isEn ? 'Draw' : 'Hòa cờ', tone: 'over' }
 
-  const turnLabel = game.turn() === 'w' ? 'Trắng' : 'Đen'
+  const turnLabel =
+    game.turn() === 'w'
+      ? isEn
+        ? 'White'
+        : 'Trắng'
+      : isEn
+        ? 'Black'
+        : 'Đen'
   if (game.inCheck()) {
-    return { text: `Lượt ${turnLabel} • Đang bị chiếu!`, tone: 'check' }
+    return {
+      text: isEn
+        ? `${turnLabel} to move • Check!`
+        : `Lượt ${turnLabel} • Đang bị chiếu!`,
+      tone: 'check',
+    }
   }
-  return { text: `Lượt của quân ${turnLabel}`, tone: 'normal' }
+  return {
+    text: isEn ? `${turnLabel} to move` : `Lượt của quân ${turnLabel}`,
+    tone: 'normal',
+  }
 }
 
 function findCheckedKingSquare(game: Chess): Square | null {
@@ -290,6 +335,16 @@ export function App() {
     useState<PendingPromotion | null>(null)
   const [importModalTab, setImportModalTab] = useState<ImportTab | null>(null)
   const [copiedType, setCopiedType] = useState<'fen' | 'pgn' | null>(null)
+  const [lang, setLang] = useState<Language>(getInitialLanguage)
+  const isEn = lang === 'en'
+
+  const handleToggleLanguage = () => {
+    setLang((prev) => {
+      const next: Language = prev === 'vi' ? 'en' : 'vi'
+      saveLanguage(next)
+      return next
+    })
+  }
 
   // Multi-Engine state
   const [engineEnabled, setEngineEnabled] = useState<boolean>(true)
@@ -393,7 +448,7 @@ export function App() {
   const theme = BOARD_THEMES[themeId]
   const board = displayGame.board()
   const turn = displayGame.turn()
-  const status = getGameStatus(displayGame)
+  const status = getGameStatus(displayGame, lang)
   const checkedKingSquare = findCheckedKingSquare(displayGame)
   const material = getMaterialSummary(displayGame)
 
@@ -451,6 +506,7 @@ export function App() {
       before: liveMoveCtx.before,
       after: afterEval,
       isCheckmate: liveMoveCtx.isCheckmate,
+      lang,
     })
   })()
 
@@ -461,7 +517,7 @@ export function App() {
         color: CLASSIFICATION_META[currentReviewMove.classification].color,
         textColor:
           CLASSIFICATION_META[currentReviewMove.classification].badgeText,
-        label: CLASSIFICATION_META[currentReviewMove.classification].label,
+        label: CLASSIFICATION_LABEL[lang][currentReviewMove.classification],
       }
     : liveMoveCtx && liveMoveVerdict
       ? {
@@ -470,7 +526,7 @@ export function App() {
           color: CLASSIFICATION_META[liveMoveVerdict.classification].color,
           textColor:
             CLASSIFICATION_META[liveMoveVerdict.classification].badgeText,
-          label: `${liveMoveCtx.san} — ${CLASSIFICATION_META[liveMoveVerdict.classification].label}`,
+          label: `${liveMoveCtx.san} — ${CLASSIFICATION_LABEL[lang][liveMoveVerdict.classification]}`,
         }
       : null
 
@@ -818,6 +874,24 @@ export function App() {
         isSearching: false,
       }
     }
+    // Keep EvaluationBar 100% in sync with Game Review eval when stepping through a reviewed game
+    if (
+      currentReviewMove &&
+      !variation &&
+      sidebarTab === 'review'
+    ) {
+      return {
+        ...INITIAL_EVALUATION,
+        cp: currentReviewMove.cp,
+        mate: currentReviewMove.mate,
+        depth: reviewEngine === 'stockfish-16' ? 16 : 12,
+        targetDepth: reviewEngine === 'stockfish-16' ? 16 : 12,
+        bestMove: currentReviewMove.bestMoveBefore,
+        pv: [],
+        isSearching: false,
+        isReady: true,
+      }
+    }
     if (engineMode === 'cloud' && activeCloudResult?.lines[0]) {
       const top = activeCloudResult.lines[0]
       return {
@@ -1093,6 +1167,7 @@ export function App() {
     try {
       const result = await runFullGameReview(targetStartFen, targetMoves, {
         engineId,
+        lang,
         signal: controller.signal,
         onProgress: (completed, total) => {
           setReviewProgress({ completed, total })
@@ -1107,7 +1182,9 @@ export function App() {
       setReviewError(
         err instanceof Error
           ? err.message
-          : 'Không thể hoàn tất phân tích toàn ván.',
+          : isEn
+            ? 'Could not complete full game review.'
+            : 'Không thể hoàn tất phân tích toàn ván.',
       )
       setReviewProgress(null)
     }
@@ -1650,28 +1727,33 @@ export function App() {
                 JustChess
               </h1>
               <p className="hidden truncate text-xs text-stone-400 sm:block">
-                {gameMeta ?? 'Chơi cờ & Phân tích thông minh'}
+                {gameMeta ??
+                  (isEn
+                    ? 'Play Chess & Smart Analysis'
+                    : 'Chơi cờ & Phân tích thông minh')}
               </p>
             </div>
           </div>
 
-          <div className="flex shrink-0 items-center gap-2 sm:gap-2.5">
+          <div className="flex shrink-0 items-center gap-1.5 sm:gap-2.5">
             {/* Primary unified Import CTA */}
             <button
               type="button"
               onClick={() => setImportModalTab('online')}
-              className="flex items-center gap-1.5 rounded-lg bg-[#81b64c] px-3 py-2 text-xs font-bold text-[#161512] shadow-sm transition hover:bg-[#95c75d] sm:px-3.5 sm:py-2"
+              className="flex items-center gap-1.5 rounded-lg bg-[#81b64c] px-2.5 py-2 text-xs font-bold text-[#161512] shadow-sm transition hover:bg-[#95c75d] sm:px-3.5 sm:py-2"
             >
               <UploadIcon className="h-4 w-4 shrink-0" />
-              <span>Tải ván</span>
-              <span className="hidden sm:inline">/ Thế cờ</span>
+              <span>{isEn ? 'Load Game' : 'Tải ván'}</span>
+              <span className="hidden sm:inline">
+                {isEn ? '/ FEN' : '/ Thế cờ'}
+              </span>
             </button>
 
             {/* Compact Theme Swatches */}
             <div
               className="flex items-center gap-0.5 rounded-lg bg-[#1a1917] p-1 ring-1 ring-white/[0.08] sm:gap-1"
               role="group"
-              aria-label="Chọn màu bàn cờ"
+              aria-label={isEn ? 'Board theme' : 'Chọn màu bàn cờ'}
             >
               {(Object.keys(BOARD_THEMES) as BoardThemeId[]).map((id) => {
                 const t = BOARD_THEMES[id]
@@ -1681,7 +1763,7 @@ export function App() {
                     key={id}
                     type="button"
                     onClick={() => setThemeId(id)}
-                    title={`Màu bàn cờ: ${t.name}`}
+                    title={`${isEn ? 'Board theme' : 'Màu bàn cờ'}: ${t.name}`}
                     aria-label={t.name}
                     className={[
                       'flex items-center gap-1.5 rounded-md p-1.5 text-xs font-medium transition sm:px-2',
@@ -1702,12 +1784,43 @@ export function App() {
               })}
             </div>
 
+            {/* Language Switcher (VI / EN) */}
+            <button
+              type="button"
+              onClick={handleToggleLanguage}
+              title={
+                isEn
+                  ? 'Switch to Vietnamese (Tiếng Việt)'
+                  : 'Chuyển sang tiếng Anh (English)'
+              }
+              aria-label={isEn ? 'Switch language' : 'Đổi ngôn ngữ'}
+              className="flex h-9 items-center justify-center rounded-lg bg-[#2e2c28] px-2.5 font-mono text-xs font-bold text-stone-100 ring-1 ring-white/10 transition hover:bg-[#3d3a36] sm:h-10 sm:px-3"
+            >
+              {lang === 'vi' ? 'VI' : 'EN'}
+            </button>
+
             {/* Sound toggle */}
             <button
               type="button"
               onClick={() => setSoundEnabled((prev) => !prev)}
-              title={soundEnabled ? 'Tắt âm thanh' : 'Bật âm thanh'}
-              aria-label={soundEnabled ? 'Tắt âm thanh' : 'Bật âm thanh'}
+              title={
+                soundEnabled
+                  ? isEn
+                    ? 'Mute sound'
+                    : 'Tắt âm thanh'
+                  : isEn
+                    ? 'Enable sound'
+                    : 'Bật âm thanh'
+              }
+              aria-label={
+                soundEnabled
+                  ? isEn
+                    ? 'Mute sound'
+                    : 'Tắt âm thanh'
+                  : isEn
+                    ? 'Enable sound'
+                    : 'Bật âm thanh'
+              }
               className={[
                 'flex h-9 w-9 items-center justify-center rounded-lg ring-1 transition sm:h-10 sm:w-10',
                 soundEnabled
@@ -1734,6 +1847,7 @@ export function App() {
             <div className="w-4.5 shrink-0 sm:w-7" aria-hidden="true" />
             <div className="min-w-0 flex-1">
               <PlayerBar
+                lang={lang}
                 name={
                   topColor === 'w' ? players.white.name : players.black.name
                 }
@@ -1768,6 +1882,7 @@ export function App() {
           {/* Evaluation Bar + Chessboard row */}
           <div className="flex w-full max-w-[636px] items-stretch gap-1.5 sm:gap-2.5">
             <EvaluationBar
+              lang={lang}
               evaluation={activeEvalForBar}
               orientation={orientation}
               enabled={engineEnabled}
@@ -1808,6 +1923,7 @@ export function App() {
             <div className="w-4.5 shrink-0 sm:w-7" aria-hidden="true" />
             <div className="min-w-0 flex-1">
               <PlayerBar
+                lang={lang}
                 name={
                   bottomColor === 'w' ? players.white.name : players.black.name
                 }
@@ -1912,7 +2028,9 @@ export function App() {
           {/* Desktop-only subtle keyboard & right-click hint */}
           <div className="hidden w-full max-w-[636px] flex-wrap items-center justify-between gap-2 pl-9 text-[11px] text-stone-500 lg:flex">
             <span>
-              Chuột phải: đánh dấu ô / kéo vẽ mũi tên (
+              {isEn
+                ? 'Right-click: highlight square / draw arrows ('
+                : 'Chuột phải: đánh dấu ô / kéo vẽ mũi tên ('}
               <kbd className="rounded bg-white/5 px-1 text-stone-400">
                 Shift
               </kbd>{' '}
@@ -1921,13 +2039,13 @@ export function App() {
               )
             </span>
             <span>
-              Phím{' '}
+              {isEn ? 'Keys ' : 'Phím '}
               <kbd className="rounded bg-white/5 px-1 text-stone-400">←</kbd>{' '}
               <kbd className="rounded bg-white/5 px-1 text-stone-400">→</kbd>{' '}
-              từng nước •{' '}
+              {isEn ? 'step • ' : 'từng nước • '}
               <kbd className="rounded bg-white/5 px-1 text-stone-400">↑</kbd>{' '}
               <kbd className="rounded bg-white/5 px-1 text-stone-400">↓</kbd>{' '}
-              đầu/cuối ván
+              {isEn ? 'start/end' : 'đầu/cuối ván'}
             </span>
           </div>
         </section>
@@ -1947,7 +2065,7 @@ export function App() {
           >
             <span className="truncate">
               {botThinking
-                ? `🤖 ${activeBotPreset.name} đang suy nghĩ...`
+                ? `🤖 ${activeBotPreset.name} ${isEn ? 'is thinking...' : 'đang suy nghĩ...'}`
                 : status.text}
             </span>
             {moves.length > 0 && (
@@ -1961,14 +2079,15 @@ export function App() {
           {botActive && (
             <div className="flex items-center justify-between gap-2 border-b border-emerald-500/20 bg-emerald-500/10 px-3.5 py-1.5 text-xs">
               <span className="font-semibold text-emerald-300">
-                🤖 Đang đấu với {activeBotPreset.name} ({activeBotPreset.eloLabel})
+                🤖 {isEn ? 'Playing vs' : 'Đang đấu với'} {activeBotPreset.name} (
+                {activeBotPreset.eloLabel})
               </span>
               <button
                 type="button"
                 onClick={stopBotMatch}
                 className="rounded bg-white/10 px-2 py-0.5 text-[11px] font-semibold text-stone-200 hover:bg-white/20"
               >
-                Dừng Bot
+                {isEn ? 'Stop Bot' : 'Dừng Bot'}
               </button>
             </div>
           )}
@@ -1978,14 +2097,17 @@ export function App() {
             <div className="border-b border-purple-500/25 bg-purple-500/12 px-3.5 py-2">
               <div className="flex items-center justify-between gap-2">
                 <span className="text-xs font-bold text-purple-300">
-                  🌿 Nhánh biến thử (từ nước {variation.branchPly})
+                  🌿{' '}
+                  {isEn
+                    ? `Variation (from ply ${variation.branchPly})`
+                    : `Nhánh biến thử (từ nước ${variation.branchPly})`}
                 </span>
                 <button
                   type="button"
                   onClick={exitVariation}
                   className="rounded-md bg-purple-500/25 px-2.5 py-1 text-[11px] font-bold text-purple-100 transition hover:bg-purple-500/40"
                 >
-                  ↩ Về ván chính
+                  {isEn ? '↩ Main Line' : '↩ Về ván chính'}
                 </button>
               </div>
               <div className="mt-1.5 flex flex-wrap gap-1 font-mono text-[11px]">
@@ -2027,7 +2149,7 @@ export function App() {
               ].join(' ')}
             >
               <GameTabIcon className="h-5 w-5" />
-              <span>Ván đấu</span>
+              <span>{isEn ? 'Game' : 'Ván đấu'}</span>
             </button>
             <button
               type="button"
@@ -2040,7 +2162,7 @@ export function App() {
               ].join(' ')}
             >
               <BotTabIcon className="h-5 w-5" />
-              <span>Đấu Bot</span>
+              <span>{isEn ? 'Bots' : 'Đấu Bot'}</span>
               {botActive && (
                 <span className="absolute top-1.5 right-2 h-2 w-2 rounded-full bg-emerald-400 ring-2 ring-[#1e1c1a]" />
               )}
@@ -2056,7 +2178,7 @@ export function App() {
               ].join(' ')}
             >
               <ReviewTabIcon className="h-5 w-5" />
-              <span>Đánh giá</span>
+              <span>{isEn ? 'Review' : 'Đánh giá'}</span>
               {reviewResult && (
                 <span className="absolute top-1.5 right-2 h-2 w-2 rounded-full bg-[#81b64c] ring-2 ring-[#1e1c1a]" />
               )}
@@ -2085,7 +2207,7 @@ export function App() {
               {/* Choose side */}
               <div className="rounded-xl bg-[#1f1d1a] p-3 ring-1 ring-white/[0.06]">
                 <div className="mb-2 text-[11px] font-semibold tracking-wider text-stone-400 uppercase">
-                  Chọn phe của bạn
+                  {isEn ? 'Choose Your Side' : 'Chọn phe của bạn'}
                 </div>
                 <div className="grid grid-cols-2 gap-2">
                   <button
@@ -2098,7 +2220,7 @@ export function App() {
                         : 'bg-[#2a2824] text-stone-300 hover:bg-[#34312d]',
                     ].join(' ')}
                   >
-                    ♔ Cầm Trắng (Đi trước)
+                    {isEn ? '♔ Play White' : '♔ Cầm Trắng (Đi trước)'}
                   </button>
                   <button
                     type="button"
@@ -2110,7 +2232,7 @@ export function App() {
                         : 'bg-[#2a2824] text-stone-300 hover:bg-[#34312d]',
                     ].join(' ')}
                   >
-                    ♚ Cầm Đen (Đi sau)
+                    {isEn ? '♚ Play Black' : '♚ Cầm Đen (Đi sau)'}
                   </button>
                 </div>
               </div>
@@ -2119,15 +2241,21 @@ export function App() {
               <div className="rounded-xl bg-[#1f1d1a] p-3 ring-1 ring-white/[0.06]">
                 <div className="mb-2 flex items-center justify-between">
                   <span className="text-[11px] font-semibold tracking-wider text-fuchsia-300 uppercase">
-                    Maia Chess (Đánh như người thật)
+                    {isEn
+                      ? 'Maia Chess (Human-like AI)'
+                      : 'Maia Chess (Đánh như người thật)'}
                   </span>
                   {maiaStatus !== 'ready' && (
                     <span className="text-[10px] text-stone-400">
                       {maiaStatus === 'downloading'
-                        ? `Đang tải ${maiaProgress}%`
+                        ? `${isEn ? 'Downloading' : 'Đang tải'} ${maiaProgress}%`
                         : maiaStatus === 'loading'
-                          ? 'Đang nạp...'
-                          : 'Cần tải 43MB'}
+                          ? isEn
+                            ? 'Loading...'
+                            : 'Đang nạp...'
+                          : isEn
+                            ? '43MB download'
+                            : 'Cần tải 43MB'}
                     </span>
                   )}
                 </div>
@@ -2156,7 +2284,9 @@ export function App() {
               {/* Stockfish 19 Bots */}
               <div className="rounded-xl bg-[#1f1d1a] p-3 ring-1 ring-white/[0.06]">
                 <div className="mb-2 text-[11px] font-semibold tracking-wider text-[#a3d160] uppercase">
-                  Stockfish 19 (Đa cấp độ Elo)
+                  {isEn
+                    ? 'Stockfish 19 (All Elo Levels)'
+                    : 'Stockfish 19 (Đa cấp độ Elo)'}
                 </div>
                 <div className="flex flex-col gap-1.5">
                   {BOT_PRESETS.filter((b) => b.engine === 'stockfish').map(
@@ -2334,11 +2464,14 @@ export function App() {
                     </div>
                     <div>
                       <p className="text-sm font-bold text-stone-200">
-                        Sẵn sàng bắt đầu ván mới
+                        {isEn
+                          ? 'Ready for a new game'
+                          : 'Sẵn sàng bắt đầu ván mới'}
                       </p>
                       <p className="mt-1 max-w-[260px] text-xs leading-relaxed text-stone-400">
-                        Kéo thả hoặc nhấp chọn quân Trắng để đi, hoặc tải ván đấu
-                        có sẵn để phân tích.
+                        {isEn
+                          ? 'Drag or click a White piece to play, or load an existing game to review.'
+                          : 'Kéo thả hoặc nhấp chọn quân Trắng để đi, hoặc tải ván đấu có sẵn để phân tích.'}
                       </p>
                     </div>
                     <div className="mt-1 flex flex-wrap justify-center gap-2">
@@ -2347,14 +2480,17 @@ export function App() {
                         onClick={() => setImportModalTab('online')}
                         className="rounded-lg bg-[#81b64c] px-3.5 py-2 text-xs font-bold text-[#161512] transition hover:bg-[#95c75d]"
                       >
-                        🔍 Tìm ván Lichess / Chess.com
+                        🔍{' '}
+                        {isEn
+                          ? 'Search Lichess / Chess.com'
+                          : 'Tìm ván Lichess / Chess.com'}
                       </button>
                       <button
                         type="button"
                         onClick={() => setImportModalTab('pgn')}
                         className="rounded-lg bg-[#34312d] px-3.5 py-2 text-xs font-semibold text-stone-200 transition hover:bg-[#423f3a]"
                       >
-                        Dán PGN / FEN
+                        {isEn ? 'Paste PGN / FEN' : 'Dán PGN / FEN'}
                       </button>
                     </div>
                   </div>
@@ -2486,7 +2622,10 @@ export function App() {
                     onClick={() => void startGameReview()}
                     className="w-full rounded-lg bg-[#81b64c]/18 py-2 text-xs font-bold text-[#b4e07c] ring-1 ring-[#81b64c]/35 transition hover:bg-[#81b64c]/28"
                   >
-                    📊 Chấm điểm toàn ván (Game Review)
+                    📊{' '}
+                    {isEn
+                      ? 'Run Full Game Review'
+                      : 'Chấm điểm toàn ván (Game Review)'}
                   </button>
                 </div>
               )}
@@ -2499,11 +2638,13 @@ export function App() {
               <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 py-10 text-center">
                 <div className="text-4xl">🎓</div>
                 <div className="text-sm font-bold text-white">
-                  Stockfish 19 đang chấm điểm ván đấu...
+                  {isEn
+                    ? 'Stockfish 19 is reviewing your game...'
+                    : 'Stockfish 19 đang chấm điểm ván đấu...'}
                 </div>
                 <p className="text-xs text-stone-400">
-                  Đang phân tích nước {reviewProgress.completed} /{' '}
-                  {reviewProgress.total}
+                  {isEn ? 'Analyzing ply' : 'Đang phân tích nước'}{' '}
+                  {reviewProgress.completed} / {reviewProgress.total}
                 </p>
                 <div className="h-2.5 w-full max-w-[260px] overflow-hidden rounded-full bg-[#34312d]">
                   <div
@@ -2518,11 +2659,12 @@ export function App() {
                   onClick={cancelReview}
                   className="mt-1 rounded-lg bg-[#34312d] px-4 py-2 text-xs font-semibold text-stone-200 hover:bg-[#423f3a]"
                 >
-                  Hủy phân tích
+                  {isEn ? 'Cancel Review' : 'Hủy phân tích'}
                 </button>
               </div>
             ) : reviewResult ? (
               <GameReviewPanel
+                lang={lang}
                 review={reviewResult}
                 selectedEngine={reviewEngine}
                 timeControl={timeControl}
@@ -2573,21 +2715,37 @@ export function App() {
                 </div>
                 <div>
                   <h3 className="text-sm font-bold text-white">
-                    Đánh giá ván đấu (Đa Engine)
+                    {isEn
+                      ? 'Multi-Engine Game Review'
+                      : 'Đánh giá ván đấu (Đa Engine)'}
                   </h3>
                   <p className="mt-1.5 text-xs leading-relaxed text-stone-400">
-                    Chấm điểm Accuracy %, ước lượng Elo{' '}
-                    <strong className="text-amber-300">FIDE</strong> /{' '}
-                    <strong className="text-[#a3d160]">Chess.com</strong> /{' '}
-                    <strong className="text-sky-300">Lichess</strong>, gắn huy
-                    hiệu trực tiếp trên bàn cờ và HLV nhận xét từng nước đi.
+                    {isEn ? (
+                      <>
+                        Calculate Accuracy %, estimate{' '}
+                        <strong className="text-amber-300">FIDE</strong> /{' '}
+                        <strong className="text-[#a3d160]">Chess.com</strong> /{' '}
+                        <strong className="text-sky-300">Lichess</strong>{' '}
+                        ratings, show on-board move badges, and get Coach
+                        commentary.
+                      </>
+                    ) : (
+                      <>
+                        Chấm điểm Accuracy %, ước lượng Elo{' '}
+                        <strong className="text-amber-300">FIDE</strong> /{' '}
+                        <strong className="text-[#a3d160]">Chess.com</strong> /{' '}
+                        <strong className="text-sky-300">Lichess</strong>, gắn
+                        huy hiệu trực tiếp trên bàn cờ và HLV nhận xét từng nước
+                        đi.
+                      </>
+                    )}
                   </p>
                 </div>
 
                 {/* Review Engine Selector before starting */}
                 <div className="w-full max-w-[300px] rounded-xl bg-[#1f1d1a] p-2.5 text-left ring-1 ring-white/[0.06]">
                   <div className="mb-1.5 text-[10px] font-semibold tracking-wider text-stone-400 uppercase">
-                    Chọn Engine chấm điểm
+                    {isEn ? 'Select Review Engine' : 'Chọn Engine chấm điểm'}
                   </div>
                   <div className="grid grid-cols-2 gap-1.5">
                     {REVIEW_ENGINES.map((eng) => (
@@ -2615,7 +2773,10 @@ export function App() {
                     onClick={() => void startGameReview()}
                     className="rounded-lg bg-[#81b64c] px-5 py-2.5 text-xs font-bold text-[#161512] shadow-md transition hover:bg-[#95c75d]"
                   >
-                    📊 Bắt đầu Game Review ({moves.length} nước)
+                    📊{' '}
+                    {isEn
+                      ? `Start Game Review (${moves.length} plies)`
+                      : `Bắt đầu Game Review (${moves.length} nước)`}
                   </button>
                 ) : (
                   <div className="flex flex-wrap justify-center gap-2">
@@ -2624,14 +2785,17 @@ export function App() {
                       onClick={() => setImportModalTab('online')}
                       className="rounded-lg bg-[#81b64c] px-3.5 py-2 text-xs font-bold text-[#161512] transition hover:bg-[#95c75d]"
                     >
-                      🔍 Tải ván Lichess / Chess.com
+                      🔍{' '}
+                      {isEn
+                        ? 'Load Lichess / Chess.com'
+                        : 'Tải ván Lichess / Chess.com'}
                     </button>
                     <button
                       type="button"
                       onClick={() => setImportModalTab('pgn')}
                       className="rounded-lg bg-[#34312d] px-3.5 py-2 text-xs font-semibold text-stone-200 transition hover:bg-[#423f3a]"
                     >
-                      Dán PGN
+                      {isEn ? 'Paste PGN' : 'Dán PGN'}
                     </button>
                   </div>
                 )}
@@ -2660,7 +2824,7 @@ export function App() {
                     ].join(' ')}
                   />
                   <span className="text-xs font-bold text-stone-100">
-                    Trạng thái Engine
+                    {isEn ? 'Engine Status' : 'Trạng thái Engine'}
                   </span>
                 </div>
 
@@ -2676,7 +2840,7 @@ export function App() {
                           : 'bg-[#302e2b] text-stone-400 hover:text-stone-200',
                       ].join(' ')}
                     >
-                      ↗ Mũi tên
+                      {isEn ? '↗ Arrows' : '↗ Mũi tên'}
                     </button>
                   )}
                   <button
@@ -2689,7 +2853,13 @@ export function App() {
                         : 'bg-[#302e2b] text-stone-300 hover:bg-[#3d3a36]',
                     ].join(' ')}
                   >
-                    {engineEnabled ? 'Đang bật' : 'Đang tắt'}
+                    {engineEnabled
+                      ? isEn
+                        ? 'On'
+                        : 'Đang bật'
+                      : isEn
+                        ? 'Off'
+                        : 'Đang tắt'}
                   </button>
                 </div>
               </div>
@@ -3133,7 +3303,7 @@ export function App() {
                 className="flex items-center justify-center gap-1.5 rounded-xl bg-[#32302c] px-3 py-2.5 text-xs font-semibold text-stone-100 transition hover:bg-[#403d38]"
               >
                 <FlipIcon className="h-4 w-4 shrink-0" />
-                <span>Xoay bàn</span>
+                <span>{isEn ? 'Flip' : 'Xoay bàn'}</span>
               </button>
               <button
                 type="button"
@@ -3142,7 +3312,7 @@ export function App() {
                 className="flex items-center justify-center gap-1.5 rounded-xl bg-[#32302c] px-3 py-2.5 text-xs font-semibold text-stone-100 transition hover:bg-[#403d38] disabled:opacity-35"
               >
                 <UndoIcon className="h-4 w-4 shrink-0" />
-                <span>Hoàn tác</span>
+                <span>{isEn ? 'Undo' : 'Hoàn tác'}</span>
               </button>
               <button
                 type="button"
@@ -3150,7 +3320,7 @@ export function App() {
                 className="flex items-center justify-center gap-1.5 rounded-xl bg-[#81b64c] px-3 py-2.5 text-xs font-bold text-[#161512] shadow-xs transition hover:bg-[#95c75d]"
               >
                 <ResetIcon className="h-4 w-4 shrink-0" />
-                <span>Ván mới</span>
+                <span>{isEn ? 'New Game' : 'Ván mới'}</span>
               </button>
             </div>
 
@@ -3163,7 +3333,13 @@ export function App() {
               >
                 <CopyIcon className="h-4 w-4 shrink-0 text-stone-400" />
                 <span>
-                  {copiedType === 'fen' ? 'Đã sao chép FEN ✓' : 'Sao chép FEN'}
+                  {copiedType === 'fen'
+                    ? isEn
+                      ? 'FEN Copied ✓'
+                      : 'Đã sao chép FEN ✓'
+                    : isEn
+                      ? 'Copy FEN'
+                      : 'Sao chép FEN'}
                 </span>
               </button>
               <button
@@ -3174,7 +3350,13 @@ export function App() {
               >
                 <CopyIcon className="h-4 w-4 shrink-0 text-stone-400" />
                 <span>
-                  {copiedType === 'pgn' ? 'Đã sao chép PGN ✓' : 'Sao chép PGN'}
+                  {copiedType === 'pgn'
+                    ? isEn
+                      ? 'PGN Copied ✓'
+                      : 'Đã sao chép PGN ✓'
+                    : isEn
+                      ? 'Copy PGN'
+                      : 'Sao chép PGN'}
                 </span>
               </button>
             </div>
@@ -3184,16 +3366,29 @@ export function App() {
 
       {/* Legal & Open-Source Attribution Footer (GPL-3.0 compliance) */}
       <footer className="border-t border-white/[0.06] bg-[#1e1c1a] px-4 py-3 text-center text-[11px] text-stone-500">
-        JustChess • Giấy phép{' '}
-        <span className="font-medium text-stone-400">GPL-3.0-or-later</span> •
-        Engine: Stockfish 19 (GPL-3.0), Maia-3 ONNX (GPL-3.0), chess.js
-        (BSD-2-Clause) • Dự án độc lập, không liên kết chính thức với Lichess
-        hay Chess.com.
+        {isEn ? (
+          <>
+            JustChess • Licensed under{' '}
+            <span className="font-medium text-stone-400">GPL-3.0-or-later</span>{' '}
+            • Engines: Stockfish 19 (GPL-3.0), Maia-3 ONNX (GPL-3.0), chess.js
+            (BSD-2-Clause) • Independent open-source project, not affiliated
+            with Lichess or Chess.com.
+          </>
+        ) : (
+          <>
+            JustChess • Giấy phép{' '}
+            <span className="font-medium text-stone-400">GPL-3.0-or-later</span>{' '}
+            • Engine: Stockfish 19 (GPL-3.0), Maia-3 ONNX (GPL-3.0), chess.js
+            (BSD-2-Clause) • Dự án độc lập, không liên kết chính thức với
+            Lichess hay Chess.com.
+          </>
+        )}
       </footer>
 
       {/* Import Online / PGN / FEN Modal */}
       {importModalTab !== null && (
         <ImportModal
+          lang={lang}
           initialTab={importModalTab}
           currentFen={fen}
           onImportFen={handleImportFen}

@@ -1,7 +1,9 @@
 import type { PieceSymbol } from 'chess.js'
+import type { Language } from '../utils/i18n'
 import { ChessPiece } from './ChessPiece'
 
 interface PlayerBarProps {
+  lang?: Language
   name: string
   title?: string
   rating?: number
@@ -14,6 +16,7 @@ interface PlayerBarProps {
 }
 
 export function PlayerBar({
+  lang = 'vi',
   name,
   title,
   rating,
@@ -24,6 +27,7 @@ export function PlayerBar({
   capturedPieces,
   materialAdvantage,
 }: PlayerBarProps) {
+  const isEn = lang === 'en'
   const capturedColor: 'w' | 'b' = color === 'w' ? 'b' : 'w'
 
   return (
@@ -64,7 +68,7 @@ export function PlayerBar({
             )}
             {fideRating && (
               <span
-                title="Hệ số FIDE chính thức"
+                title={isEn ? 'Official FIDE rating' : 'Hệ số FIDE chính thức'}
                 className="rounded bg-amber-500/15 px-1.5 py-0.5 font-mono text-[10px] font-bold text-amber-300 ring-1 ring-amber-500/30"
               >
                 FIDE {fideRating}
@@ -72,7 +76,7 @@ export function PlayerBar({
             )}
             {isInCheck && (
               <span className="rounded-md bg-red-600 px-1.5 py-0.5 text-[10px] font-bold tracking-wide text-white uppercase">
-                Đang bị chiếu
+                {isEn ? 'In check' : 'Đang bị chiếu'}
               </span>
             )}
           </div>
@@ -96,7 +100,13 @@ export function PlayerBar({
               </>
             ) : (
               <span className="text-[11px] text-stone-500">
-                {color === 'w' ? 'Cầm quân Trắng' : 'Cầm quân Đen'}
+                {color === 'w'
+                  ? isEn
+                    ? 'Playing White'
+                    : 'Cầm quân Trắng'
+                  : isEn
+                    ? 'Playing Black'
+                    : 'Cầm quân Đen'}
               </span>
             )}
           </div>
@@ -117,7 +127,13 @@ export function PlayerBar({
             isTurn ? 'animate-pulse bg-[#81b64c]' : 'bg-stone-600',
           ].join(' ')}
         />
-        {isTurn ? 'Đến lượt' : 'Đang chờ'}
+        {isTurn
+          ? isEn
+            ? 'Your turn'
+            : 'Đến lượt'
+          : isEn
+            ? 'Waiting'
+            : 'Đang chờ'}
       </div>
     </div>
   )

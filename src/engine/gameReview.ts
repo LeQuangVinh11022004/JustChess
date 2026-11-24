@@ -143,6 +143,7 @@ export type MoveClassification =
   | 'book'
   | 'inaccuracy'
   | 'mistake'
+  | 'miss'
   | 'blunder'
 
 export interface ReviewMoveInfo {
@@ -243,6 +244,7 @@ export interface SideReviewSummary {
   book: number
   inaccuracy: number
   mistake: number
+  miss: number
   blunder: number
 }
 
@@ -274,6 +276,7 @@ export const CLASSIFICATION_ORDER: MoveClassification[] = [
   'book',
   'inaccuracy',
   'mistake',
+  'miss',
   'blunder',
 ]
 
@@ -335,6 +338,13 @@ export const CLASSIFICATION_META: Record<
     label: 'Sai lầm (Mistake)',
     color: '#e6912c',
     bg: 'rgba(230, 145, 44, 0.24)',
+    badgeText: '#ffffff',
+  },
+  miss: {
+    symbol: '×',
+    label: 'Bỏ lỡ (Miss)',
+    color: '#ff7769',
+    bg: 'rgba(255, 119, 105, 0.24)',
     badgeText: '#ffffff',
   },
   blunder: {
@@ -438,6 +448,7 @@ export function classifyLiveMove(params: {
   before: { cp: number | null; mate: number | null; bestMove: string | null }
   after: { cp: number | null; mate: number | null }
   isCheckmate: boolean
+  lang?: 'vi' | 'en'
 }): {
   classification: MoveClassification
   winLoss: number
@@ -461,6 +472,24 @@ export function classifyLiveMove(params: {
   const moverCpBefore = params.color === 'w' ? cpBeforeWhite : -cpBeforeWhite
   const moverCpAfter = params.color === 'w' ? cpAfterWhite : -cpAfterWhite
   const cpLoss = Math.max(0, Math.min(1000, moverCpBefore - moverCpAfter))
+
+  let liveLegalCount = 20
+  let liveWasInCheck = false
+  let fenAfter = params.fenBefore
+  try {
+    const temp = new Chess()
+    temp.load(params.fenBefore)
+    liveLegalCount = temp.moves().length
+    liveWasInCheck = temp.inCheck()
+    temp.move({
+      from: params.uci.slice(0, 2) as Square,
+      to: params.uci.slice(2, 4) as Square,
+      promotion: (params.uci[4] as PieceSymbol | undefined) ?? undefined,
+    })
+    fenAfter = temp.fen()
+  } catch {
+    // Fallback to defaults
+  }
 
   const classification = classifyMove({
     ply: params.ply,
@@ -487,8 +516,8 @@ export function classifyLiveMove(params: {
           : -params.after.mate,
     isSacrifice: false,
     isCheckmate: params.isCheckmate,
-    legalMoveCount: 20,
-    wasInCheckBefore: false,
+    legalMoveCount: liveLegalCount,
+    wasInCheckBefore: liveWasInCheck,
     isImmediateRecapture: false,
     isObviousFreeCapture: false,
     isPromotion: Boolean(params.uci[4]),
@@ -499,19 +528,6 @@ export function classifyLiveMove(params: {
     params.fenBefore,
     params.before.bestMove,
   )
-  let fenAfter = params.fenBefore
-  try {
-    const temp = new Chess()
-    temp.load(params.fenBefore)
-    temp.move({
-      from: params.uci.slice(0, 2) as Square,
-      to: params.uci.slice(2, 4) as Square,
-      promotion: (params.uci[4] as PieceSymbol | undefined) ?? undefined,
-    })
-    fenAfter = temp.fen()
-  } catch {
-    // Fallback to fenBefore
-  }
 
   const commentary = buildCoachCommentary({
     san: params.san,
@@ -529,6 +545,7 @@ export function classifyLiveMove(params: {
     cpAfter: params.after.cp,
     mateAfter: params.after.mate,
     isCheckmate: params.isCheckmate,
+    lang: params.lang ?? 'vi',
   })
 
   return { classification, winLoss, bestMoveBeforeSan, commentary }
@@ -590,25 +607,39 @@ function classifyMove(params: {
   const isTopChoice = Boolean(bestMoveBefore && uci === bestMoveBefore)
 
   if (isCheckmate) return 'best'
+  // A move with only 1 legal option is forced — never an error or blunder
+  if (legalMoveCount <= 1) return 'best'
 
-  // 1. Walking directly into a forced checkmate when position was not already mated
+  // Already in a forced checkmate sequence before moving (preparing to be mated):
+  // every legal move gets mated — never punish as a Blunder or Mistake!
+  if (mateBeforeForMover !== null && mateBeforeForMover < 0) {
+    return isTopChoice ? 'best' : 'good'
+  }
+
+  // 1. Walking directly into a forced checkmate when position was genuinely playable
   if (
+    !isTopChoice &&
     mateAfterForMover !== null &&
     mateAfterForMover < 0 &&
     (mateBeforeForMover === null || mateBeforeForMover >= 0)
   ) {
+    // If already losing badly (<= 18%) or desperate defense (<= 28%), don't harshly brand as Blunder
+    if (moverWinBefore <= 18) return 'inaccuracy'
+    if (moverWinBefore <= 28) return 'mistake'
     return 'blunder'
   }
 
-  // 2. Throwing away a forced mate
+  // 2. Missing a forced checkmate (only if player did NOT play the engine's top move)
   if (
+    !isTopChoice &&
     mateBeforeForMover !== null &&
     mateBeforeForMover > 0 &&
     mateAfterForMover === null
   ) {
-    if (moverWinAfter < 75) return 'blunder'
-    if (moverWinAfter < 88) return 'mistake'
-    return 'inaccuracy'
+    if (moverWinAfter >= 88) return 'inaccuracy'
+    // Still equal or winning after missing mate -> Miss (Bỏ lỡ cơ hội), NOT Blunder!
+    if (moverWinAfter >= 45) return 'miss'
+    return 'blunder'
   }
 
   // 3. Opening book heuristic: standard opening plies with tight accuracy & balanced eval
@@ -666,26 +697,28 @@ function classifyMove(params: {
     return 'great'
   }
 
-  // 6. Position-aware Win% (Expected Points) classification
-  // Pure winLoss naturally scales with position context (no false blunders on +8 -> +5.5!)
-  if (isTopChoice || winLoss <= 0.8) return 'best'
-  if (winLoss <= 2.2) return 'excellent'
-  if (winLoss <= 4.5) return 'good'
+  // 6. Friendly, Chess.com-aligned Win% (Expected Points) classification
+  if (isTopChoice || winLoss <= 1.2) return 'best'
+  if (winLoss <= 3.0) return 'excellent'
+  if (winLoss <= 6.0) return 'good'
 
-  // Safeguard: never label a move Mistake/Blunder if you remain overwhelmingly winning (+5.0+)
-  // or were already completely lost (-5.5 or worse) without walking into a new forced mate.
-  if (moverWinAfter >= 90) return 'good'
-  if (moverWinAfter >= 84 || moverWinBefore <= 12) return 'inaccuracy'
+  // Safeguard: never label a move Mistake/Blunder if you remain clearly winning (+3.5+)
+  // or were already clearly lost (-4.0 or worse) without walking into a new forced mate.
+  if (moverWinAfter >= 85) return 'good'
+  if (moverWinAfter >= 78 || moverWinBefore <= 18) return 'inaccuracy'
 
-  // Outcome-flip strictness: throwing away a clearly winning position to equal/worse,
-  // or collapsing from equal to clearly lost is always a Blunder.
-  const threwWinningGame = moverWinBefore >= 70 && moverWinAfter <= 54
-  const collapsedFromEqual = moverWinBefore >= 45 && moverWinAfter <= 32
-  if (threwWinningGame || collapsedFromEqual || winLoss > 13.5) {
+  // Miss (Bỏ lỡ cơ hội): had a clearly winning chance (>= 68%) and missed it,
+  // but the position is still equal or better (>= 44%) rather than collapsing to lost.
+  if (moverWinBefore >= 68 && moverWinAfter >= 44 && winLoss >= 14.0) {
+    return 'miss'
+  }
+
+  // True Blunder: drops >= 3.0 points (300 cp) on the evaluation bar into a losing position (< 44%)
+  if (cpLoss >= 300 && moverWinAfter < 44) {
     return 'blunder'
   }
 
-  if (winLoss > 8.0) return 'mistake'
+  if (winLoss > 12.0) return 'mistake'
   return 'inaccuracy'
 }
 
@@ -696,6 +729,15 @@ const PIECE_NAME_VI: Record<PieceSymbol, string> = {
   r: 'Xe',
   q: 'Hậu',
   k: 'Vua',
+}
+
+const PIECE_NAME_EN: Record<PieceSymbol, string> = {
+  p: 'Pawn',
+  n: 'Knight',
+  b: 'Bishop',
+  r: 'Rook',
+  q: 'Queen',
+  k: 'King',
 }
 
 const CENTER_SQUARES = new Set(['d4', 'd5', 'e4', 'e5', 'c4', 'c5', 'f4', 'f5'])
@@ -772,9 +814,33 @@ function describeRecommendedReason(
   fenBefore: string,
   bestMoveUci: string | null,
   bestMoveSan: string | null,
+  lang: 'vi' | 'en' = 'vi',
 ): string {
   if (!bestMoveSan) return ''
   const info = inspectSingleUciMove(fenBefore, bestMoveUci)
+  if (lang === 'en') {
+    if (!info) return `Consider ${bestMoveSan} instead.`
+    if (info.promotion) {
+      return `Play ${bestMoveSan} to promote into a ${PIECE_NAME_EN[info.promotion]}.`
+    }
+    if (info.isCastle) {
+      return `Castling (${bestMoveSan}) brings the King to safety and connects the Rooks.`
+    }
+    if (info.captured && info.isCheck) {
+      return `${bestMoveSan} wins the ${PIECE_NAME_EN[info.captured]} on ${info.to} with check.`
+    }
+    if (info.captured) {
+      return `${bestMoveSan} captures the ${PIECE_NAME_EN[info.captured]} on ${info.to} to gain an advantage.`
+    }
+    if (info.isCheck) {
+      return `${bestMoveSan} delivers check and seizes the initiative.`
+    }
+    if (CENTER_SQUARES.has(info.to) && info.piece !== 'k') {
+      return `${bestMoveSan} controls the center more effectively.`
+    }
+    return `A stronger option was ${bestMoveSan}.`
+  }
+
   if (!info) return `Nên đi ${bestMoveSan}.`
   if (info.promotion) {
     return `Nên đi ${bestMoveSan} để phong cấp thành ${PIECE_NAME_VI[info.promotion]}.`
@@ -814,6 +880,7 @@ function buildCoachCommentary(params: {
   cpAfter: number | null
   mateAfter: number | null
   isCheckmate: boolean
+  lang?: 'vi' | 'en'
 }): string {
   const {
     san,
@@ -832,10 +899,15 @@ function buildCoachCommentary(params: {
     cpAfter,
     mateAfter,
     isCheckmate,
+    lang = 'vi',
   } = params
 
+  const isEn = lang === 'en'
+
   if (isCheckmate) {
-    return `${san} chiếu hết hoàn hảo, kết thúc ván đấu ngay lập tức!`
+    return isEn
+      ? `${san} delivers checkmate and ends the game immediately!`
+      : `${san} chiếu hết hoàn hảo, kết thúc ván đấu ngay lập tức!`
   }
 
   const played = inspectSingleUciMove(fenBefore, uci)
@@ -850,8 +922,20 @@ function buildCoachCommentary(params: {
 
   // 1. Brilliant (!!)
   if (classification === 'brilliant') {
-    const pieceLabel = played ? PIECE_NAME_VI[played.piece] : 'quân'
+    const pieceLabel = played
+      ? isEn
+        ? PIECE_NAME_EN[played.piece]
+        : PIECE_NAME_VI[played.piece]
+      : isEn
+        ? 'piece'
+        : 'quân'
     const targetSq = played ? played.to : ''
+    if (isEn) {
+      const followTxt = reply
+        ? `Even against the strongest reply ${reply.san}, you keep a decisive advantage (${evalAfterTxt}).`
+        : `This sacrifice unleashes an unstoppable tactical attack (${evalAfterTxt}).`
+      return `${san}!! Brilliant — bold ${pieceLabel} sacrifice on ${targetSq} to shatter the opponent's defense. ${followTxt}`
+    }
     const followTxt = reply
       ? `Ngay cả khi đối thủ đáp trả mạnh nhất bằng ${reply.san}, bạn vẫn duy trì ưu thế áp đảo (${evalAfterTxt}).`
       : `Nước thí này mở ra đòn chiến thuật không thể chống đỡ (${evalAfterTxt}).`
@@ -860,6 +944,19 @@ function buildCoachCommentary(params: {
 
   // 2. Great (!)
   if (classification === 'great') {
+    if (isEn) {
+      const gapTxt =
+        onlyMoveGap >= 12
+          ? `The only move to keep the position intact (2nd best is ${Math.round(onlyMoveGap)}% worse).`
+          : 'A sharp move that punishes the opponent accurately.'
+      if (played?.captured) {
+        return `${san}! ${gapTxt} Capturing the ${PIECE_NAME_EN[played.captured]} on ${played.to} converts the advantage cleanly (${evalAfterTxt}).`
+      }
+      if (played?.isCheck) {
+        return `${san}! ${gapTxt} Checking on ${played.to} forces the opponent onto the back foot.`
+      }
+      return `${san}! ${gapTxt}`
+    }
     const gapTxt =
       onlyMoveGap >= 12
         ? `Đây là nước duy nhất giữ vững thế trận (phương án tốt thứ 2 kém hơn tới ${Math.round(onlyMoveGap)}% cơ hội thắng).`
@@ -873,9 +970,10 @@ function buildCoachCommentary(params: {
     return `${san}! ${gapTxt}`
   }
 
-  // 3. Blunder / Mistake / Inaccuracy — concrete refutation analysis!
+  // 3. Blunder / Miss / Mistake / Inaccuracy — concrete refutation analysis!
   if (
     classification === 'blunder' ||
+    classification === 'miss' ||
     classification === 'mistake' ||
     classification === 'inaccuracy'
   ) {
@@ -883,40 +981,63 @@ function buildCoachCommentary(params: {
       fenBefore,
       bestMoveBefore,
       bestMoveBeforeSan,
+      lang,
     )
 
-    // Case A: Walked into forced checkmate
     if (mateAfterForMover !== null && mateAfterForMover < 0) {
       const mIn = Math.abs(mateAfterForMover)
+      if (isEn) {
+        const replyHint = reply ? ` starting with ${reply.san}` : ''
+        return `${san} walks into a forced checkmate in ${mIn}${replyHint}! ${recTxt}`
+      }
       const replyHint = reply ? ` bắt đầu bằng ${reply.san}` : ''
       return `${san} tự mở đường cho đối thủ chiếu hết cưỡng bức trong ${mIn} nước${replyHint}! ${recTxt}`
     }
 
-    // Case B: Missed forced checkmate
     if (
       mateBeforeForMover !== null &&
       mateBeforeForMover > 0 &&
       mateAfterForMover === null
     ) {
-      return `${san} bỏ lỡ đòn chiếu hết cưỡng bức trong ${mateBeforeForMover} nước (từ ${evalBeforeTxt} tụt về ${evalAfterTxt}). ${recTxt}`
+      return isEn
+        ? `${san} misses a forced checkmate in ${mateBeforeForMover} (${evalBeforeTxt} → ${evalAfterTxt}). ${recTxt}`
+        : `${san} bỏ lỡ đòn chiếu hết cưỡng bức trong ${mateBeforeForMover} nước (từ ${evalBeforeTxt} về ${evalAfterTxt}). ${recTxt}`
     }
 
-    // Case C: Hung the piece we just moved
+    if (classification === 'miss') {
+      return isEn
+        ? `${san} misses a major winning opportunity (${evalBeforeTxt} → ${evalAfterTxt}). ${recTxt}`
+        : `${san} bỏ lỡ cơ hội giành ưu thế quyết định (${evalBeforeTxt} → ${evalAfterTxt}). ${recTxt}`
+    }
+
     if (played && reply?.captured && reply.to === played.to) {
-      return `${san} đưa ${PIECE_NAME_VI[played.piece]} vào ô ${played.to} không đủ bảo vệ — đối thủ ăn ngay bằng ${reply.san} (${evalBeforeTxt} → ${evalAfterTxt}). ${recTxt}`
+      return isEn
+        ? `${san} leaves the ${PIECE_NAME_EN[played.piece]} on ${played.to} undefended — opponent captures with ${reply.san} (${evalBeforeTxt} → ${evalAfterTxt}). ${recTxt}`
+        : `${san} đưa ${PIECE_NAME_VI[played.piece]} vào ô ${played.to} không đủ bảo vệ — đối thủ ăn ngay bằng ${reply.san} (${evalBeforeTxt} → ${evalAfterTxt}). ${recTxt}`
     }
 
-    // Case D: Left another piece hanging to opponent's reply
     if (reply?.captured) {
-      return `${san} bỏ quên ${PIECE_NAME_VI[reply.captured]} tại ${reply.to}, cho phép đối thủ khai thác ngay bằng ${reply.san} (${evalBeforeTxt} → ${evalAfterTxt}). ${recTxt}`
+      return isEn
+        ? `${san} leaves the ${PIECE_NAME_EN[reply.captured]} on ${reply.to} hanging to ${reply.san} (${evalBeforeTxt} → ${evalAfterTxt}). ${recTxt}`
+        : `${san} bỏ quên ${PIECE_NAME_VI[reply.captured]} tại ${reply.to}, cho phép đối thủ khai thác ngay bằng ${reply.san} (${evalBeforeTxt} → ${evalAfterTxt}). ${recTxt}`
     }
 
-    // Case E: Allowed a strong counter-check
     if (reply?.isCheck) {
-      return `${san} làm hở Vua, để đối thủ tung đòn chiếu phản công ${reply.san} (${evalBeforeTxt} → ${evalAfterTxt}). ${recTxt}`
+      return isEn
+        ? `${san} exposes the King to a strong counter-check ${reply.san} (${evalBeforeTxt} → ${evalAfterTxt}). ${recTxt}`
+        : `${san} làm hở Vua, để đối thủ tung đòn chiếu phản công ${reply.san} (${evalBeforeTxt} → ${evalAfterTxt}). ${recTxt}`
     }
 
-    // Case F: General positional/tactical drop with concrete refutation move
+    if (isEn) {
+      const sev =
+        classification === 'blunder'
+          ? 'is a blunder'
+          : classification === 'mistake'
+            ? 'is a mistake'
+            : 'is slightly inaccurate'
+      const rep = reply ? ` allowing the strong reply ${reply.san}` : ''
+      return `${san} ${sev}${rep}, shifting the eval from ${evalBeforeTxt} → ${evalAfterTxt} (-${Math.round(winLoss)}% win chance). ${recTxt}`
+    }
     const severityLabel =
       classification === 'blunder'
         ? 'sai lầm nghiêm trọng'
@@ -931,6 +1052,15 @@ function buildCoachCommentary(params: {
 
   // 4. Book
   if (classification === 'book') {
+    if (isEn) {
+      if (played?.isCastle) {
+        return `${san} — standard opening castling, keeping the King safe.`
+      }
+      if (played && CENTER_SQUARES.has(played.to)) {
+        return `${san} — standard opening theory fighting directly for the center.`
+      }
+      return `${san} — solid opening book development, keeping the position balanced (${evalAfterTxt}).`
+    }
     if (played?.isCastle) {
       return `${san} — nhập thành chuẩn khai cuộc, bảo vệ Vua và kích hoạt Xe.`
     }
@@ -940,7 +1070,35 @@ function buildCoachCommentary(params: {
     return `${san} — nước phát triển chuẩn sách khai cuộc, giữ thế trận cân bằng (${evalAfterTxt}).`
   }
 
-  // 5. Best / Excellent / Good — explain what the move accomplished
+  // 5. Best / Excellent / Good
+  if (isEn) {
+    if (played?.promotion) {
+      return `${san} — promotes to a ${PIECE_NAME_EN[played.promotion]} with a decisive edge (${evalAfterTxt}).`
+    }
+    if (played?.isCastle) {
+      return `${san} — timely castling, safeguarding the King and connecting Rooks (${evalAfterTxt}).`
+    }
+    if (played?.captured && played.isCheck) {
+      return `${san} — sharp tactic capturing the ${PIECE_NAME_EN[played.captured]} on ${played.to} with check (${evalAfterTxt}).`
+    }
+    if (played?.captured) {
+      return `${san} — solid capture of the ${PIECE_NAME_EN[played.captured]} on ${played.to} (${evalAfterTxt}).`
+    }
+    if (played?.isCheck) {
+      return `${san} — active check on ${played.to}, keeping the initiative (${evalAfterTxt}).`
+    }
+    if (mateAfterForMover !== null && mateAfterForMover > 0) {
+      return `${san} — accurate move forcing checkmate in ${mateAfterForMover}!`
+    }
+    if (played && CENTER_SQUARES.has(played.to) && played.piece !== 'k') {
+      return `${san} — places the ${PIECE_NAME_EN[played.piece]} on ${played.to} with strong central control (${evalAfterTxt}).`
+    }
+    if (classification === 'good' && bestMoveBeforeSan && bestMoveBeforeSan !== san) {
+      return `${san} is a solid move (${evalAfterTxt}), though ${bestMoveBeforeSan} offered slightly more pressure.`
+    }
+    return `${san} — accurate move improving piece activity (${evalAfterTxt}).`
+  }
+
   if (played?.promotion) {
     return `${san} — phong cấp thành ${PIECE_NAME_VI[played.promotion]}, tạo ưu thế áp đảo (${evalAfterTxt}).`
   }
@@ -1305,16 +1463,16 @@ function computePhaseStats(
 function buildOverallSummary(
   white: SideReviewSummary,
   black: SideReviewSummary,
+  lang: 'vi' | 'en' = 'vi',
 ): string {
-  const phaseNames: Record<GamePhase, string> = {
-    opening: 'Khai cuộc',
-    middlegame: 'Trung cuộc',
-    endgame: 'Tàn cuộc',
-  }
+  const isEn = lang === 'en'
+  const phaseNames: Record<GamePhase, string> = isEn
+    ? { opening: 'the Opening', middlegame: 'the Middlegame', endgame: 'the Endgame' }
+    : { opening: 'Khai cuộc', middlegame: 'Trung cuộc', endgame: 'Tàn cuộc' }
 
   let biggestPhase: GamePhase = 'middlegame'
   let biggestGap = -1
-  let winnerInPhase: 'Trắng' | 'Đen' = 'Trắng'
+  let winnerInPhase: 'w' | 'b' = 'w'
 
   for (const ph of ['opening', 'middlegame', 'endgame'] as GamePhase[]) {
     const wAcc = white.phases[ph].accuracy
@@ -1324,7 +1482,7 @@ function buildOverallSummary(
       if (gap > biggestGap) {
         biggestGap = gap
         biggestPhase = ph
-        winnerInPhase = wAcc >= bAcc ? 'Trắng' : 'Đen'
+        winnerInPhase = wAcc >= bAcc ? 'w' : 'b'
       }
     }
   }
@@ -1332,18 +1490,28 @@ function buildOverallSummary(
   if (biggestGap >= 10) {
     const wAcc = Math.round(white.phases[biggestPhase].accuracy ?? 0)
     const bAcc = Math.round(black.phases[biggestPhase].accuracy ?? 0)
-    return `Điểm nhấn quyết định nằm ở ${phaseNames[biggestPhase]} khi bên ${winnerInPhase} chơi vượt trội (${wAcc}% vs ${bAcc}%).`
+    if (isEn) {
+      return `The decisive phase was ${phaseNames[biggestPhase]}, where ${winnerInPhase === 'w' ? 'White' : 'Black'} outplayed the opponent (${wAcc}% vs ${bAcc}%).`
+    }
+    return `Điểm nhấn quyết định nằm ở ${phaseNames[biggestPhase]} khi bên ${winnerInPhase === 'w' ? 'Trắng' : 'Đen'} chơi vượt trội (${wAcc}% vs ${bAcc}%).`
   }
 
   if (white.accuracy >= 85 && black.accuracy >= 85) {
-    return 'Ván đấu chất lượng cao, cả hai bên đều duy trì độ chính xác ổn định qua các giai đoạn.'
+    return isEn
+      ? 'High-quality game from both sides with consistent accuracy across all phases.'
+      : 'Ván đấu chất lượng cao, cả hai bên đều duy trì độ chính xác ổn định qua các giai đoạn.'
   }
 
   if (white.blunder + black.blunder >= 4) {
-    return `Thế cờ diễn biến căng thẳng với nhiều sai lầm chiến thuật (${white.blunder + black.blunder} Blunder) xoay chuyển cục diện.`
+    const totalB = white.blunder + black.blunder
+    return isEn
+      ? `A wild tactical battle with ${totalB} blunders swinging the evaluation back and forth.`
+      : `Thế cờ diễn biến căng thẳng với nhiều sai lầm chiến thuật (${totalB} Blunder) xoay chuyển cục diện.`
   }
 
-  return `Hai bên bám đuổi khá sát (${white.accuracy}% vs ${black.accuracy}%), phân định bằng sự chính xác ở những nước then chốt.`
+  return isEn
+    ? `A closely contested game (${white.accuracy}% vs ${black.accuracy}%), decided by precision in critical moments.`
+    : `Hai bên bám đuổi khá sát (${white.accuracy}% vs ${black.accuracy}%), phân định bằng sự chính xác ở những nước then chốt.`
 }
 
 function computeSideSummary(
@@ -1379,6 +1547,7 @@ function computeSideSummary(
     book: 0,
     inaccuracy: 0,
     mistake: 0,
+    miss: 0,
     blunder: 0,
   }
 
@@ -1443,6 +1612,9 @@ function evaluateSingleFen(
     const perspective = turn === 'w' ? 1 : -1
     let cp: number | null = 0
     let mate: number | null = null
+    let hasExactScore = false
+    let fallbackCp: number | null = null
+    let fallbackMate: number | null = null
     let bestMove: string | null = null
     let pv: string[] = []
     let secondCp: number | null = null
@@ -1458,20 +1630,31 @@ function evaluateSingleFen(
       const line = typeof event.data === 'string' ? event.data.trim() : ''
       if (!line) return
 
-      // Ignore aspiration bound lines (upperbound / lowerbound) to avoid noisy eval spikes
-      if (
-        line.startsWith('info ') &&
-        line.includes(' score ') &&
-        !line.includes('upperbound') &&
-        !line.includes('lowerbound')
-      ) {
+      if (line.startsWith('info ') && line.includes(' score ')) {
+        const isBound =
+          line.includes('upperbound') || line.includes('lowerbound')
         const multipvMatch = line.match(/\bmultipv\s+(\d+)/)
         const multipv = multipvMatch ? Number.parseInt(multipvMatch[1], 10) : 1
         const cpMatch = line.match(/\bscore\s+cp\s+(-?\d+)/)
         const mateMatch = line.match(/\bscore\s+mate\s+(-?\d+)/)
         const pvMatch = line.match(/\bpv\s+(.+)$/)
 
+        if (isBound) {
+          // Keep as fallback only in case Stockfish never emits an exact score (e.g. forced move)
+          if (multipv === 1) {
+            if (cpMatch) {
+              fallbackCp = Number.parseInt(cpMatch[1], 10) * perspective
+              fallbackMate = null
+            } else if (mateMatch) {
+              fallbackMate = Number.parseInt(mateMatch[1], 10) * perspective
+              fallbackCp = null
+            }
+          }
+          return
+        }
+
         if (multipv === 1) {
+          hasExactScore = true
           if (cpMatch) {
             cp = Number.parseInt(cpMatch[1], 10) * perspective
             mate = null
@@ -1500,8 +1683,17 @@ function evaluateSingleFen(
         if (match && match[1] !== '(none)') {
           bestMove = match[1]
         }
+        const finalCp = hasExactScore ? cp : (fallbackCp ?? cp)
+        const finalMate = hasExactScore ? mate : (fallbackMate ?? mate)
         cleanup()
-        resolve({ cp, mate, bestMove, pv, secondCp, secondMate })
+        resolve({
+          cp: finalCp,
+          mate: finalMate,
+          bestMove,
+          pv,
+          secondCp,
+          secondMate,
+        })
       }
     }
 
@@ -1648,11 +1840,13 @@ export async function runFullGameReview(
   moves: ReviewInputMove[],
   options: {
     engineId?: ReviewEngineId
+    lang?: 'vi' | 'en'
     signal: AbortSignal
     onProgress?: (completed: number, total: number) => void
   },
 ): Promise<GameReviewResult> {
   const engineId: ReviewEngineId = options.engineId ?? 'stockfish-12'
+  const lang: 'vi' | 'en' = options.lang ?? 'vi'
   const engineMeta =
     REVIEW_ENGINES.find((e) => e.id === engineId) ?? REVIEW_ENGINES[0]
   const { signal, onProgress } = options
@@ -1965,6 +2159,7 @@ export async function runFullGameReview(
         cpAfter: after.cp,
         mateAfter: after.mate,
         isCheckmate: snapAfter.isCheckmate,
+        lang,
       })
 
       reviewedMoves.push({
@@ -1999,7 +2194,7 @@ export async function runFullGameReview(
       startWinPercent,
       moves: reviewedMoves,
       phaseRanges,
-      overallSummary: buildOverallSummary(whiteSummary, blackSummary),
+      overallSummary: buildOverallSummary(whiteSummary, blackSummary, lang),
       white: whiteSummary,
       black: blackSummary,
     }

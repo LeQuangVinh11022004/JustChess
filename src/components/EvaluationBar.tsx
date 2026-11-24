@@ -2,8 +2,10 @@ import {
   formatEvaluationScore,
   type EngineEvaluation,
 } from '../engine/stockfishService'
+import type { Language } from '../utils/i18n'
 
 interface EvaluationBarProps {
+  lang?: Language
   evaluation: EngineEvaluation
   orientation: 'w' | 'b'
   enabled: boolean
@@ -25,11 +27,13 @@ function getWhitePercentage(evaluation: EngineEvaluation): number {
 }
 
 export function EvaluationBar({
+  lang = 'vi',
   evaluation,
   orientation,
   enabled,
   gameResult = null,
 }: EvaluationBarProps) {
+  const isEn = lang === 'en'
   const whitePercent =
     gameResult === '1-0'
       ? 100
@@ -71,8 +75,10 @@ export function EvaluationBar({
     <div
       title={
         enabled
-          ? `Stockfish 19 • Đánh giá: ${scoreText} • Depth ${evaluation.depth}/${evaluation.targetDepth}${evaluation.bestMove ? ` • Best: ${evaluation.bestMove}` : ''}`
-          : 'Stockfish đang tắt'
+          ? `Stockfish 19 • ${isEn ? 'Eval' : 'Đánh giá'}: ${scoreText} • Depth ${evaluation.depth}/${evaluation.targetDepth}${evaluation.bestMove ? ` • Best: ${evaluation.bestMove}` : ''}`
+          : isEn
+            ? 'Stockfish is off'
+            : 'Stockfish đang tắt'
       }
       className={[
         'relative flex w-4.5 shrink-0 flex-col overflow-hidden rounded-md bg-[#3c3935] shadow-inner ring-1 ring-black/60 select-none sm:w-7',

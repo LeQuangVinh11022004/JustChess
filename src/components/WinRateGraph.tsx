@@ -3,18 +3,22 @@ import {
   type GameReviewResult,
   type MoveClassification,
 } from '../engine/gameReview'
+import type { Language } from '../utils/i18n'
 
 interface WinRateGraphProps {
+  lang?: Language
   review: GameReviewResult
   currentPly: number
   onSelectPly: (ply: number) => void
 }
 
 export function WinRateGraph({
+  lang = 'vi',
   review,
   currentPly,
   onSelectPly,
 }: WinRateGraphProps) {
+  const isEn = lang === 'en'
   const points: Array<{
     ply: number
     win: number
@@ -60,10 +64,12 @@ export function WinRateGraph({
     <div className="flex flex-col gap-1.5">
       <div className="flex items-center justify-between text-[11px]">
         <span className="font-semibold text-stone-300">
-          Biểu đồ Win-Rate (Trắng vs Đen)
+          {isEn
+            ? 'Win-Rate Graph (White vs Black)'
+            : 'Biểu đồ Win-Rate (Trắng vs Đen)'}
         </span>
         <span className="font-mono text-stone-400">
-          Trắng {Math.round(currentPoint.win)}%
+          {isEn ? 'White' : 'Trắng'} {Math.round(currentPoint.win)}%
         </span>
       </div>
 
@@ -71,7 +77,9 @@ export function WinRateGraph({
         viewBox={`0 0 ${width} ${height}`}
         onClick={handleClick}
         role="img"
-        aria-label="Biểu đồ diễn biến tỷ lệ thắng"
+        aria-label={
+          isEn ? 'Win probability chart' : 'Biểu đồ diễn biến tỷ lệ thắng'
+        }
         className="h-[84px] w-full cursor-pointer overflow-hidden rounded-md bg-[#2d2a26] ring-1 ring-white/10"
       >
         {/* White advantage area fill */}

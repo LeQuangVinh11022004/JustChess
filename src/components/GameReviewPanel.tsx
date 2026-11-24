@@ -12,6 +12,13 @@ import {
   type ReviewMoveInfo,
   type TimeControlCategory,
 } from '../engine/gameReview'
+import {
+  CLASSIFICATION_LABEL,
+  PHASE_GRADE_LABEL,
+  PHASE_LABEL,
+  TIME_CONTROL_LABEL,
+  type Language,
+} from '../utils/i18n'
 import { WinRateGraph } from './WinRateGraph'
 
 const TIME_CONTROLS: TimeControlCategory[] = [
@@ -22,6 +29,7 @@ const TIME_CONTROLS: TimeControlCategory[] = [
 ]
 
 interface GameReviewPanelProps {
+  lang?: Language
   review: GameReviewResult
   selectedEngine: ReviewEngineId
   timeControl: TimeControlCategory
@@ -43,6 +51,7 @@ interface GameReviewPanelProps {
 }
 
 export function GameReviewPanel({
+  lang = 'vi',
   review,
   selectedEngine,
   timeControl,
@@ -62,6 +71,7 @@ export function GameReviewPanel({
   onChangeTimeControl,
   onReRunReview,
 }: GameReviewPanelProps) {
+  const isEn = lang === 'en'
   const tcMeta = TIME_CONTROL_META[timeControl]
   const { white: whiteRatings, black: blackRatings } = estimateMatchRatings({
     white: review.white,
@@ -77,6 +87,7 @@ export function GameReviewPanel({
       m.classification === 'brilliant' ||
       m.classification === 'great' ||
       m.classification === 'mistake' ||
+      m.classification === 'miss' ||
       m.classification === 'blunder',
   )
 
@@ -84,6 +95,7 @@ export function GameReviewPanel({
     currentMove !== null &&
     (currentMove.classification === 'inaccuracy' ||
       currentMove.classification === 'mistake' ||
+      currentMove.classification === 'miss' ||
       currentMove.classification === 'blunder')
 
   const currentMeta = currentMove
@@ -96,14 +108,14 @@ export function GameReviewPanel({
       <div className="flex items-center justify-between gap-2 rounded-xl bg-[#1f1d1a] px-3 py-2 ring-1 ring-white/[0.06]">
         <div className="min-w-0">
           <div className="text-[10px] font-medium tracking-wide text-stone-500 uppercase">
-            Engine chấm điểm
+            {isEn ? 'Review Engine' : 'Engine chấm điểm'}
           </div>
           <div className="truncate text-xs font-bold text-[#b4e07c]">
             {review.engineLabel}
           </div>
         </div>
         <select
-          aria-label="Chọn Engine chấm điểm"
+          aria-label={isEn ? 'Select Review Engine' : 'Chọn Engine chấm điểm'}
           value={selectedEngine}
           onChange={(e) => {
             const next = e.target.value as ReviewEngineId
@@ -158,7 +170,7 @@ export function GameReviewPanel({
                       color: currentMeta.badgeText,
                     }}
                   >
-                    {currentMeta.label}
+                    {CLASSIFICATION_LABEL[lang][currentMove.classification]}
                   </span>
                 </div>
                 <p className="mt-1.5 text-xs leading-relaxed text-stone-200">
@@ -170,7 +182,7 @@ export function GameReviewPanel({
                     {currentMove.refutationLine && (
                       <div className="truncate text-red-300">
                         <span className="font-sans text-[10px] font-semibold text-stone-400">
-                          Đối thủ phản công:{' '}
+                          {isEn ? 'Opponent refutation: ' : 'Đối thủ phản công: '}
                         </span>
                         {currentMove.refutationLine}
                       </div>
@@ -178,7 +190,7 @@ export function GameReviewPanel({
                     {currentMove.recommendedLine && (
                       <div className="truncate text-[#b4e07c]">
                         <span className="font-sans text-[10px] font-semibold text-stone-400">
-                          Nhánh tốt hơn:{' '}
+                          {isEn ? 'Better line: ' : 'Nhánh tốt hơn: '}
                         </span>
                         {currentMove.recommendedLine}
                       </div>
@@ -188,7 +200,7 @@ export function GameReviewPanel({
                   currentMove.refutationLine ? (
                   <div className="mt-2 truncate rounded-lg bg-[#161512] px-2.5 py-1.5 font-mono text-[11px] text-[#1baca6] ring-1 ring-[#1baca6]/30">
                     <span className="font-sans text-[10px] font-semibold text-stone-400">
-                      Diễn biến tiếp:{' '}
+                      {isEn ? 'Continuation: ' : 'Diễn biến tiếp: '}
                     </span>
                     {currentMove.refutationLine}
                   </div>
@@ -197,18 +209,35 @@ export function GameReviewPanel({
             ) : (
               <>
                 <div className="text-sm font-bold text-white">
-                  Tổng quan ván đấu
+                  {isEn ? 'Game Overview' : 'Tổng quan ván đấu'}
                 </div>
                 <p className="mt-1 text-xs leading-relaxed text-stone-300">
-                  Ván đấu gồm {totalPlies} nước đi. Độ chính xác: Trắng{' '}
-                  <strong className="text-[#a3d160]">
-                    {review.white.accuracy}%
-                  </strong>{' '}
-                  • Đen{' '}
-                  <strong className="text-[#a3d160]">
-                    {review.black.accuracy}%
-                  </strong>
-                  . Bấm <strong>Bắt đầu xem</strong> để duyệt từng nước!
+                  {isEn ? (
+                    <>
+                      {totalPlies} plies played. Accuracy: White{' '}
+                      <strong className="text-[#a3d160]">
+                        {review.white.accuracy}%
+                      </strong>{' '}
+                      • Black{' '}
+                      <strong className="text-[#a3d160]">
+                        {review.black.accuracy}%
+                      </strong>
+                      . Click <strong>Start Review</strong> to step through each
+                      move!
+                    </>
+                  ) : (
+                    <>
+                      Ván đấu gồm {totalPlies} nước đi. Độ chính xác: Trắng{' '}
+                      <strong className="text-[#a3d160]">
+                        {review.white.accuracy}%
+                      </strong>{' '}
+                      • Đen{' '}
+                      <strong className="text-[#a3d160]">
+                        {review.black.accuracy}%
+                      </strong>
+                      . Bấm <strong>Bắt đầu xem</strong> để duyệt từng nước!
+                    </>
+                  )}
                 </p>
               </>
             )}
@@ -230,8 +259,10 @@ export function GameReviewPanel({
                 ].join(' ')}
               >
                 {showBestMoveHint
-                  ? `Ẩn gợi ý`
-                  : `Gợi ý: ${currentMove.bestMoveBeforeSan}`}
+                  ? isEn
+                    ? 'Hide Hint'
+                    : 'Ẩn gợi ý'
+                  : `${isEn ? 'Best' : 'Gợi ý'}: ${currentMove.bestMoveBeforeSan}`}
               </button>
               <button
                 type="button"
@@ -240,7 +271,7 @@ export function GameReviewPanel({
                 }
                 className="rounded-lg bg-[#302e2b] px-3 py-1.5 text-xs font-semibold text-stone-200 transition hover:bg-[#3d3a36]"
               >
-                Đi thử {currentMove.bestMoveBeforeSan}
+                {isEn ? 'Try' : 'Đi thử'} {currentMove.bestMoveBeforeSan}
               </button>
             </>
           )}
@@ -253,16 +284,23 @@ export function GameReviewPanel({
             className="ml-auto rounded-lg bg-[#81b64c] px-3.5 py-1.5 text-xs font-bold text-[#161512] shadow-xs transition hover:bg-[#95c75d]"
           >
             {currentPly === 0
-              ? 'Bắt đầu xem →'
+              ? isEn
+                ? 'Start Review →'
+                : 'Bắt đầu xem →'
               : currentPly < totalPlies
-                ? 'Nước tiếp →'
-                : 'Xem lại từ đầu'}
+                ? isEn
+                  ? 'Next Move →'
+                  : 'Nước tiếp →'
+                : isEn
+                  ? 'Restart Review'
+                  : 'Xem lại từ đầu'}
           </button>
         </div>
       </div>
 
       {/* Win-Rate Graph */}
       <WinRateGraph
+        lang={lang}
         review={review}
         currentPly={currentPly}
         onSelectPly={onSelectPly}
@@ -273,9 +311,13 @@ export function GameReviewPanel({
         <div className="rounded-xl bg-[#1f1d1a] p-3 ring-1 ring-white/[0.06]">
           <div className="mb-2 flex items-center justify-between text-xs">
             <span className="font-semibold text-stone-200">
-              Bước ngoặt chính ({keyMoments.length})
+              {isEn
+                ? `Key Moments (${keyMoments.length})`
+                : `Bước ngoặt chính (${keyMoments.length})`}
             </span>
-            <span className="text-[11px] text-stone-500">Nhấp để xem</span>
+            <span className="text-[11px] text-stone-500">
+              {isEn ? 'Click to jump' : 'Nhấp để xem'}
+            </span>
           </div>
           <div className="flex flex-wrap gap-1.5">
             {keyMoments.slice(0, 10).map((m) => {
@@ -346,7 +388,9 @@ export function GameReviewPanel({
         <div className="mb-3 rounded-lg bg-[#181715] p-2.5 ring-1 ring-white/[0.05]">
           <div className="mb-2 flex flex-col gap-1.5">
             <div className="text-center text-[10px] font-semibold tracking-wider text-stone-400 uppercase">
-              Ước lượng Elo theo thể loại cờ
+              {isEn
+                ? 'Estimated Game Rating by Time Control'
+                : 'Ước lượng Elo theo thể loại cờ'}
             </div>
             <div className="grid grid-cols-4 gap-1 rounded-md bg-[#22201d] p-0.5">
               {TIME_CONTROLS.map((tc) => (
@@ -354,7 +398,7 @@ export function GameReviewPanel({
                   key={tc}
                   type="button"
                   onClick={() => onChangeTimeControl(tc)}
-                  title={TIME_CONTROL_META[tc].label}
+                  title={TIME_CONTROL_LABEL[lang][tc]}
                   className={[
                     'rounded py-1 text-[10px] font-semibold transition',
                     timeControl === tc
@@ -407,12 +451,14 @@ export function GameReviewPanel({
           </div>
 
           <p className="mt-1.5 text-center text-[10px] text-stone-400">
-            Ước lượng khách quan từ Accuracy, ACPL &amp; chất lượng nước đi thực
-            tế của ván đấu.
+            {isEn
+              ? 'Objective estimate from overall Accuracy, ACPL & match result.'
+              : 'Ước lượng khách quan từ Accuracy, ACPL & chất lượng tổng thể của ván đấu.'}
             {(whiteRating || blackRating) && (
               <>
                 {' '}
-                (Elo hồ sơ: {whiteRating ?? '?'} vs {blackRating ?? '?'}
+                ({isEn ? 'Profile Elo' : 'Elo hồ sơ'}: {whiteRating ?? '?'} vs{' '}
+                {blackRating ?? '?'}
                 {sourcePlatform !== 'unknown'
                   ? ` • ${sourcePlatform === 'chesscom' ? 'Chess.com' : 'Lichess'}`
                   : ''}
@@ -422,17 +468,23 @@ export function GameReviewPanel({
           </p>
           {timeControl === 'bullet' && (
             <p className="mt-1 text-center text-[10px] text-stone-500">
-              *FIDE không có hệ số Bullet riêng nên quy đổi sang FIDE Blitz.
+              {isEn
+                ? '*FIDE has no separate Bullet rating, mapped to FIDE Blitz.'
+                : '*FIDE không có hệ số Bullet riêng nên quy đổi sang FIDE Blitz.'}
             </p>
           )}
         </div>
 
-        {/* Overall & Game Phase Breakdown (Khai cuộc / Trung cuộc / Tàn cuộc) */}
+        {/* Overall & Game Phase Breakdown (Opening / Middlegame / Endgame) */}
         <div className="mb-3 rounded-lg bg-[#181715] p-2.5 ring-1 ring-white/[0.05]">
           <div className="mb-1.5 flex items-center justify-between text-[10px] font-semibold tracking-wider text-stone-400 uppercase">
-            <span>Đánh giá Overall &amp; Giai đoạn</span>
+            <span>
+              {isEn
+                ? 'Overall & Game Phases'
+                : 'Đánh giá Overall & Giai đoạn'}
+            </span>
             <span className="font-normal normal-case text-stone-500">
-              Nhấp để nhảy tới
+              {isEn ? 'Click to jump' : 'Nhấp để nhảy tới'}
             </span>
           </div>
 
@@ -454,7 +506,7 @@ export function GameReviewPanel({
                   {PHASE_GRADE_META[review.white.overallGrade].symbol}
                 </span>
                 <span className="text-xs font-bold text-stone-100">
-                  {PHASE_GRADE_META[review.white.overallGrade].label}
+                  {PHASE_GRADE_LABEL[lang][review.white.overallGrade]}
                 </span>
               </div>
 
@@ -464,7 +516,7 @@ export function GameReviewPanel({
 
               <div className="flex items-center justify-end gap-2">
                 <span className="text-xs font-bold text-stone-100">
-                  {PHASE_GRADE_META[review.black.overallGrade].label}
+                  {PHASE_GRADE_LABEL[lang][review.black.overallGrade]}
                 </span>
                 <span
                   className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[11px] font-black text-white shadow-xs"
@@ -478,22 +530,22 @@ export function GameReviewPanel({
               </div>
             </div>
 
-            {/* 3 Phases: Khai cuộc, Trung cuộc, Tàn cuộc */}
+            {/* 3 Phases: Opening, Middlegame, Endgame */}
             {(
               [
                 {
                   id: 'opening' as GamePhase,
-                  label: 'Khai cuộc',
+                  label: PHASE_LABEL[lang].opening,
                   startPly: review.phaseRanges.openingStartPly,
                 },
                 {
                   id: 'middlegame' as GamePhase,
-                  label: 'Trung cuộc',
+                  label: PHASE_LABEL[lang].middlegame,
                   startPly: review.phaseRanges.middlegameStartPly,
                 },
                 {
                   id: 'endgame' as GamePhase,
-                  label: 'Tàn cuộc',
+                  label: PHASE_LABEL[lang].endgame,
                   startPly: review.phaseRanges.endgameStartPly,
                 },
               ] as const
@@ -603,7 +655,7 @@ export function GameReviewPanel({
                   >
                     {meta.symbol}
                   </span>
-                  <span>{meta.label}</span>
+                  <span>{CLASSIFICATION_LABEL[lang][tier]}</span>
                 </div>
 
                 <span
@@ -622,7 +674,8 @@ export function GameReviewPanel({
           onClick={() => onReRunReview(selectedEngine)}
           className="mt-3 w-full rounded-lg bg-[#2e2c28] py-2 text-xs font-semibold text-stone-200 transition hover:bg-[#3d3a36]"
         >
-          ↻ Phân tích lại với {review.engineLabel}
+          ↻ {isEn ? 'Re-analyze with' : 'Phân tích lại với'}{' '}
+          {review.engineLabel}
         </button>
       </div>
     </div>

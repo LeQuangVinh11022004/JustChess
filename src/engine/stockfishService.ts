@@ -26,7 +26,7 @@ export const INITIAL_EVALUATION: EngineEvaluation = {
   cp: 0,
   mate: null,
   depth: 0,
-  targetDepth: 15,
+  targetDepth: 12,
   bestMove: null,
   pv: [],
   lines: [],
@@ -103,7 +103,7 @@ export class StockfishService {
     }
   }
 
-  public analyze(fen: string, depth = 15, multiPv = 2): void {
+  public analyze(fen: string, depth = 12, multiPv = 2): void {
     if (!this.worker) return
 
     this.pendingSearch = { fen, depth, multiPv }

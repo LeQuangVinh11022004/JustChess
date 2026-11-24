@@ -1,5 +1,6 @@
 import { Chess, DEFAULT_POSITION, validateFen } from 'chess.js'
 import { useState } from 'react'
+import type { Language } from '../utils/i18n'
 import {
   fetchOnlinePlayerProfile,
   fetchOnlineUserGames,
@@ -11,6 +12,7 @@ import {
 export type ImportTab = 'online' | 'pgn' | 'fen'
 
 interface ImportModalProps {
+  lang?: Language
   initialTab?: ImportTab
   currentFen: string
   onImportFen: (fen: string) => void
@@ -21,15 +23,18 @@ interface ImportModalProps {
 
 const SAMPLE_FENS = [
   {
-    label: 'Thế cờ chuẩn',
+    labelVi: 'Thế cờ chuẩn',
+    labelEn: 'Starting Position',
     fen: DEFAULT_POSITION,
   },
   {
-    label: 'Chiếu hết 1 nước (Trắng)',
+    labelVi: 'Chiếu hết 1 nước (Trắng)',
+    labelEn: 'Mate in 1 (White)',
     fen: 'r1bqkb1r/pppp1ppp/2n2n2/4p2Q/2B1P3/8/PPPP1PPP/RNB1K1NR w KQkq - 4 4',
   },
   {
-    label: 'Tàn cuộc Vua + Xe',
+    labelVi: 'Tàn cuộc Vua + Xe',
+    labelEn: 'King + Rook Endgame',
     fen: '6k1/5ppp/8/8/8/8/5PPP/4R1K1 w - - 0 1',
   },
 ]
@@ -52,6 +57,7 @@ const QUICK_USERS: Record<OnlinePlatform, string[]> = {
 }
 
 export function ImportModal({
+  lang = 'vi',
   initialTab = 'online',
   currentFen,
   onImportFen,
@@ -59,6 +65,7 @@ export function ImportModal({
   onImportOnlineGame,
   onClose,
 }: ImportModalProps) {
+  const isEn = lang === 'en'
   const [tab, setTab] = useState<ImportTab>(initialTab)
   const [fenInput, setFenInput] = useState(currentFen)
   const [pgnInput, setPgnInput] = useState('')
@@ -76,13 +83,17 @@ export function ImportModal({
   const handleLoadFen = () => {
     const trimmed = fenInput.trim()
     if (!trimmed) {
-      setError('Vui lòng nhập chuỗi FEN.')
+      setError(isEn ? 'Please enter a FEN string.' : 'Vui lòng nhập chuỗi FEN.')
       return
     }
 
     const result = validateFen(trimmed)
     if (!result.ok) {
-      setError(`FEN không hợp lệ: ${result.error ?? 'Sai định dạng.'}`)
+      setError(
+        isEn
+          ? `Invalid FEN: ${result.error ?? 'Wrong format.'}`
+          : `FEN không hợp lệ: ${result.error ?? 'Sai định dạng.'}`,
+      )
       return
     }
 
@@ -94,8 +105,10 @@ export function ImportModal({
     } catch (err) {
       setError(
         err instanceof Error
-          ? `FEN không hợp lệ: ${err.message}`
-          : 'Không thể tải chuỗi FEN này.',
+          ? `${isEn ? 'Invalid FEN' : 'FEN không hợp lệ'}: ${err.message}`
+          : isEn
+            ? 'Could not load this FEN string.'
+            : 'Không thể tải chuỗi FEN này.',
       )
     }
   }
@@ -103,7 +116,11 @@ export function ImportModal({
   const handleLoadPgn = (autoReview = false) => {
     const trimmed = pgnInput.trim()
     if (!trimmed) {
-      setError('Vui lòng dán nội dung PGN vào ô bên trên.')
+      setError(
+        isEn
+          ? 'Please paste a PGN into the box above.'
+          : 'Vui lòng dán nội dung PGN vào ô bên trên.',
+      )
       return
     }
 
@@ -115,8 +132,10 @@ export function ImportModal({
     } catch (err) {
       setError(
         err instanceof Error
-          ? `PGN không hợp lệ: ${err.message}`
-          : 'Không thể đọc PGN này. Hãy kiểm tra lại ký hiệu nước đi.',
+          ? `${isEn ? 'Invalid PGN' : 'PGN không hợp lệ'}: ${err.message}`
+          : isEn
+            ? 'Could not read this PGN. Please check the move notation.'
+            : 'Không thể đọc PGN này. Hãy kiểm tra lại ký hiệu nước đi.',
       )
     }
   }
@@ -127,7 +146,11 @@ export function ImportModal({
   ) => {
     const clean = targetUser.trim()
     if (!clean) {
-      setError('Vui lòng nhập tên tài khoản Lichess hoặc Chess.com.')
+      setError(
+        isEn
+          ? 'Please enter a Lichess or Chess.com username.'
+          : 'Vui lòng nhập tên tài khoản Lichess hoặc Chess.com.',
+      )
       return
     }
 
@@ -143,14 +166,20 @@ export function ImportModal({
       setPlayerProfile(profile)
       setOnlineGames(games)
       if (games.length === 0) {
-        setError(`Không tìm thấy ván cờ tiêu chuẩn nào gần đây của "${clean}".`)
+        setError(
+          isEn
+            ? `No recent standard games found for "${clean}".`
+            : `Không tìm thấy ván cờ tiêu chuẩn nào gần đây của "${clean}".`,
+        )
       }
     } catch (err) {
       setOnlineGames([])
       setError(
         err instanceof Error
           ? err.message
-          : 'Không thể tải danh sách ván đấu. Hãy thử lại.',
+          : isEn
+            ? 'Could not load games. Please try again.'
+            : 'Không thể tải danh sách ván đấu. Hãy thử lại.',
       )
     } finally {
       setIsLoadingGames(false)
@@ -169,12 +198,12 @@ export function ImportModal({
         {/* Header */}
         <div className="flex items-center justify-between border-b border-white/10 bg-[#211f1c] px-5 py-3.5">
           <h2 className="text-base font-bold text-white">
-            Tải ván đấu &amp; Thế cờ
+            {isEn ? 'Load Game & Position' : 'Tải ván đấu & Thế cờ'}
           </h2>
           <button
             type="button"
             onClick={onClose}
-            aria-label="Đóng"
+            aria-label={isEn ? 'Close' : 'Đóng'}
             className="rounded-md px-2 py-1 text-sm text-stone-400 transition hover:bg-white/10 hover:text-white"
           >
             ✕
@@ -211,7 +240,7 @@ export function ImportModal({
                 : 'text-stone-400 hover:text-stone-200',
             ].join(' ')}
           >
-            Dán PGN
+            {isEn ? 'Paste PGN' : 'Dán PGN'}
           </button>
           <button
             type="button"
@@ -226,7 +255,7 @@ export function ImportModal({
                 : 'text-stone-400 hover:text-stone-200',
             ].join(' ')}
           >
-            Chuỗi FEN
+            {isEn ? 'FEN String' : 'Chuỗi FEN'}
           </button>
         </div>
 
@@ -290,8 +319,12 @@ export function ImportModal({
                   }}
                   placeholder={
                     platform === 'chesscom'
-                      ? 'Nhập username Chess.com (VD: Hikaru)...'
-                      : 'Nhập username Lichess (VD: DrNykterstein)...'
+                      ? isEn
+                        ? 'Chess.com username (e.g. Hikaru)...'
+                        : 'Nhập username Chess.com (VD: Hikaru)...'
+                      : isEn
+                        ? 'Lichess username (e.g. DrNykterstein)...'
+                        : 'Nhập username Lichess (VD: DrNykterstein)...'
                   }
                   className="min-w-[180px] flex-1 rounded-lg border border-white/10 bg-[#161512] px-3 py-2 text-xs text-stone-100 placeholder:text-stone-500 focus:border-[#81b64c] focus:outline-none"
                 />
@@ -301,13 +334,21 @@ export function ImportModal({
                   disabled={isLoadingGames}
                   className="rounded-lg bg-[#81b64c] px-4 py-2 text-xs font-bold text-[#161512] transition hover:bg-[#95c75d] disabled:opacity-50"
                 >
-                  {isLoadingGames ? 'Đang tìm...' : 'Tìm ván'}
+                  {isLoadingGames
+                    ? isEn
+                      ? 'Searching...'
+                      : 'Đang tìm...'
+                    : isEn
+                      ? 'Search'
+                      : 'Tìm ván'}
                 </button>
               </form>
 
               {/* Quick sample accounts */}
               <div className="flex flex-wrap items-center gap-1.5">
-                <span className="text-[11px] text-stone-500">Thử nhanh:</span>
+                <span className="text-[11px] text-stone-500">
+                  {isEn ? 'Quick try:' : 'Thử nhanh:'}
+                </span>
                 {QUICK_USERS[platform].map((sampleUser) => (
                   <button
                     key={sampleUser}
@@ -391,14 +432,19 @@ export function ImportModal({
               <div className="max-h-72 overflow-y-auto rounded-lg border border-white/10 bg-[#161512] p-1.5">
                 {isLoadingGames ? (
                   <div className="py-10 text-center text-xs text-stone-400">
-                    Đang tải danh sách ván đấu gần nhất từ{' '}
-                    {platform === 'chesscom' ? 'Chess.com' : 'Lichess'}...
+                    {isEn
+                      ? `Loading recent games from ${platform === 'chesscom' ? 'Chess.com' : 'Lichess'}...`
+                      : `Đang tải danh sách ván đấu gần nhất từ ${platform === 'chesscom' ? 'Chess.com' : 'Lichess'}...`}
                   </div>
                 ) : onlineGames.length === 0 ? (
                   <div className="py-10 text-center text-xs text-stone-500">
                     {hasSearched
-                      ? 'Chưa có ván đấu nào để hiển thị.'
-                      : 'Nhập tên tài khoản rồi bấm Tìm ván — chỉ cần 1 cú click để tải và phân tích ngay!'}
+                      ? isEn
+                        ? 'No games to display.'
+                        : 'Chưa có ván đấu nào để hiển thị.'
+                      : isEn
+                        ? 'Enter a username and click Search — load and review any game in 1 click!'
+                        : 'Nhập tên tài khoản rồi bấm Tìm ván — chỉ cần 1 cú click để tải và phân tích ngay!'}
                   </div>
                 ) : (
                   <div className="flex flex-col gap-1">
@@ -457,13 +503,19 @@ export function ImportModal({
                             ].join(' ')}
                           >
                             {g.userOutcome === 'win'
-                              ? 'Thắng'
+                              ? isEn
+                                ? 'Win'
+                                : 'Thắng'
                               : g.userOutcome === 'loss'
-                                ? 'Thua'
-                                : 'Hòa'}
+                                ? isEn
+                                  ? 'Loss'
+                                  : 'Thua'
+                                : isEn
+                                  ? 'Draw'
+                                  : 'Hòa'}
                           </span>
                           <span className="rounded bg-[#81b64c] px-2 py-1 text-[11px] font-bold text-[#161512] opacity-85 transition group-hover:opacity-100">
-                            Phân tích
+                            {isEn ? 'Review' : 'Phân tích'}
                           </span>
                         </div>
                       </button>
@@ -477,7 +529,7 @@ export function ImportModal({
           {tab === 'fen' && (
             <div className="flex flex-col gap-3">
               <label className="text-xs font-medium text-stone-300">
-                Nhập chuỗi FEN
+                {isEn ? 'Enter FEN string' : 'Nhập chuỗi FEN'}
                 <input
                   type="text"
                   value={fenInput}
@@ -491,10 +543,12 @@ export function ImportModal({
               </label>
 
               <div className="flex flex-wrap items-center gap-1.5">
-                <span className="text-[11px] text-stone-500">Mẫu nhanh:</span>
+                <span className="text-[11px] text-stone-500">
+                  {isEn ? 'Samples:' : 'Mẫu nhanh:'}
+                </span>
                 {SAMPLE_FENS.map((sample) => (
                   <button
-                    key={sample.label}
+                    key={sample.fen}
                     type="button"
                     onClick={() => {
                       setFenInput(sample.fen)
@@ -502,7 +556,7 @@ export function ImportModal({
                     }}
                     className="rounded-md bg-[#302e2b] px-2 py-1 text-[11px] font-medium text-stone-300 transition hover:bg-[#3d3a36] hover:text-white"
                   >
-                    {sample.label}
+                    {isEn ? sample.labelEn : sample.labelVi}
                   </button>
                 ))}
               </div>
@@ -512,7 +566,9 @@ export function ImportModal({
           {tab === 'pgn' && (
             <div className="flex flex-col gap-3">
               <label className="text-xs font-medium text-stone-300">
-                Dán nội dung PGN (hỗ trợ cả header từ Lichess / Chess.com)
+                {isEn
+                  ? 'Paste PGN (supports Lichess / Chess.com headers)'
+                  : 'Dán nội dung PGN (hỗ trợ cả header từ Lichess / Chess.com)'}
                 <textarea
                   rows={8}
                   value={pgnInput}
@@ -534,10 +590,14 @@ export function ImportModal({
                   }}
                   className="rounded-md bg-[#302e2b] px-2.5 py-1 text-[11px] font-medium text-stone-300 transition hover:bg-[#3d3a36] hover:text-white"
                 >
-                  Dùng ván mẫu: Opera Game (Paul Morphy, 1858)
+                  {isEn
+                    ? 'Load sample: Opera Game (Paul Morphy, 1858)'
+                    : 'Dùng ván mẫu: Opera Game (Paul Morphy, 1858)'}
                 </button>
                 <span className="text-[11px] text-stone-500">
-                  Mẹo: Dùng phím ← / → để xem từng nước
+                  {isEn
+                    ? 'Tip: Use ← / → keys to step through moves'
+                    : 'Mẹo: Dùng phím ← / → để xem từng nước'}
                 </span>
               </div>
             </div>
@@ -556,7 +616,7 @@ export function ImportModal({
                 onClick={onClose}
                 className="rounded-lg bg-[#302e2b] px-4 py-2 text-xs font-semibold text-stone-300 transition hover:bg-[#3d3a36]"
               >
-                Hủy
+                {isEn ? 'Cancel' : 'Hủy'}
               </button>
               {tab === 'pgn' && (
                 <button
@@ -564,7 +624,7 @@ export function ImportModal({
                   onClick={() => handleLoadPgn(true)}
                   className="rounded-lg bg-[#302e2b] px-4 py-2 text-xs font-semibold text-[#a3d160] ring-1 ring-[#81b64c]/40 transition hover:bg-[#3d3a36]"
                 >
-                  Tải &amp; Phân tích ngay
+                  {isEn ? 'Load & Review Now' : 'Tải & Phân tích ngay'}
                 </button>
               )}
               <button
@@ -574,7 +634,13 @@ export function ImportModal({
                 }
                 className="rounded-lg bg-[#81b64c] px-4 py-2 text-xs font-bold text-[#161512] transition hover:bg-[#95c75d]"
               >
-                {tab === 'fen' ? 'Tải thế cờ FEN' : 'Tải ván PGN'}
+                {tab === 'fen'
+                  ? isEn
+                    ? 'Load FEN'
+                    : 'Tải thế cờ FEN'
+                  : isEn
+                    ? 'Load PGN'
+                    : 'Tải ván PGN'}
               </button>
             </div>
           )}
