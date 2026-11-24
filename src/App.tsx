@@ -2986,6 +2986,52 @@ export function App() {
                       </button>
                     ))}
                   </div>
+
+                  {/* Quick Lite vs Full NNUE toggle right inside Review setup */}
+                  {reviewEngine !== 'maia-1500' && (
+                    <div className="mt-2 flex items-center justify-between gap-2 border-t border-white/[0.06] pt-2">
+                      <span className="text-[10px] font-semibold text-stone-400">
+                        {isEn ? 'NNUE Model:' : 'Bản NNUE:'}
+                      </span>
+                      <div className="flex gap-1">
+                        <button
+                          type="button"
+                          onClick={() => setSfFlavor('lite')}
+                          className={[
+                            'rounded px-2 py-0.5 text-[10px] font-bold transition',
+                            sfFlavor === 'lite'
+                              ? 'bg-[#81b64c] text-[#161512]'
+                              : 'bg-[#262421] text-stone-400 hover:text-stone-200',
+                          ].join(' ')}
+                        >
+                          Lite (1.7MB)
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (sfFullStatus === 'ready') {
+                              setSfFlavor('full')
+                            } else {
+                              void triggerFullStockfishDownload()
+                            }
+                          }}
+                          disabled={sfFullStatus === 'downloading'}
+                          className={[
+                            'rounded px-2 py-0.5 text-[10px] font-bold transition disabled:opacity-60',
+                            sfFlavor === 'full'
+                              ? 'bg-amber-400 text-[#161512]'
+                              : 'bg-[#262421] text-amber-300 hover:bg-[#2f2d29]',
+                          ].join(' ')}
+                        >
+                          {sfFullStatus === 'ready'
+                            ? 'Full NNUE ★'
+                            : sfFullStatus === 'downloading'
+                              ? `${sfFullProgress}%`
+                              : 'Full (94.5MB)'}
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </div>
 
                 {moves.length > 0 ? (

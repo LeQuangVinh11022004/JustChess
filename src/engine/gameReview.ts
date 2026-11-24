@@ -2340,9 +2340,14 @@ export async function runFullGameReview(
     const whiteSummary = computeSideSummary(reviewedMoves, startWinPercent, 'w')
     const blackSummary = computeSideSummary(reviewedMoves, startWinPercent, 'b')
 
+    const effectiveEngineLabel =
+      !isMaia && sfFlavor === 'full'
+        ? engineMeta.label.replace('Stockfish 19', 'Stockfish 19 Full NNUE').replace('SF19', 'SF19 Full NNUE')
+        : engineMeta.label
+
     return {
       engineId,
-      engineLabel: engineMeta.label,
+      engineLabel: effectiveEngineLabel,
       startWinPercent,
       moves: reviewedMoves,
       phaseRanges,
