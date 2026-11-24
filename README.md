@@ -107,3 +107,10 @@ npm run preview
 ## Đóng góp
 
 Mọi đóng góp đều được hoan nghênh! Vui lòng đọc kỹ [CONTRIBUTING.md](./CONTRIBUTING.md) và [CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md) trước khi tạo Issue hoặc Pull Request.
+
+## Giấy phép (License)
+
+Dự án **JustChess** được phát hành theo giấy phép **GNU General Public License v3.0 or later (`GPL-3.0-or-later`)** để tương thích hoàn toàn với engine **Stockfish / Stockfish.js**.
+
+- Xem toàn văn giấy phép tại [LICENSE](./LICENSE).
+- Xem danh sách đầy đủ giấy phép và ghi nhận các thư viện bên thứ ba tại [THIRD_PARTY_LICENSES.md](./THIRD_PARTY_LICENSES.md).

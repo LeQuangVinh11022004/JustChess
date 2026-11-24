@@ -17,7 +17,7 @@ export interface BoardTheme {
 export const BOARD_THEMES: Record<BoardThemeId, BoardTheme> = {
   chesscom: {
     id: 'chesscom',
-    name: 'Chess.com Green',
+    name: 'Emerald Classic',
     light: '#eeeed2',
     dark: '#769656',
     coordOnLight: '#769656',
@@ -28,7 +28,7 @@ export const BOARD_THEMES: Record<BoardThemeId, BoardTheme> = {
   },
   lichess: {
     id: 'lichess',
-    name: 'Lichess Wood',
+    name: 'Walnut Wood',
     light: '#f0d9b5',
     dark: '#b58863',
     coordOnLight: '#b58863',

@@ -15,10 +15,23 @@ import {
 import { EvaluationBar } from './components/EvaluationBar'
 import { ImportModal, type ImportTab } from './components/ImportModal'
 import { PlayerBar } from './components/PlayerBar'
+import { WinRateGraph } from './components/WinRateGraph'
+import type { LocalEngineResult } from './engine/classicalEngine'
+import type {
+  ClassicalWorkerRequest,
+  ClassicalWorkerResponse,
+  WorkerEngineStyle,
+} from './engine/classicalWorker'
 import {
-  analyzeWithLocalEngine,
-  type LocalEngineResult,
-} from './engine/classicalEngine'
+  CLASSIFICATION_META,
+  runFullGameReview,
+  type GameReviewResult,
+  type ReviewMoveInfo,
+} from './engine/gameReview'
+import {
+  fetchLichessCloudEval,
+  type LichessCloudEvalResult,
+} from './engine/lichessCloudEval'
 import {
   formatEvaluationScore,
   INITIAL_EVALUATION,
@@ -31,8 +44,15 @@ import {
   type BoardThemeId,
 } from './utils/boardThemes'
 import { chessSounds } from './utils/chessSounds'
+import type { OnlineGameSummary } from './utils/onlineGamesApi'
 
-type EngineMode = 'stockfish' | 'classical' | 'aggressive' | 'compare'
+type EngineMode =
+  | 'stockfish'
+  | 'cloud'
+  | 'jschess'
+  | 'classical'
+  | 'aggressive'
+  | 'compare'
 
 interface StoredMove {
   from: Square
@@ -57,7 +77,17 @@ const ENGINE_MODES: Array<{ id: EngineMode; label: string; desc: string }> = [
   {
     id: 'stockfish',
     label: 'Stockfish 19',
-    desc: 'NNUE sâu • Top 2 biến',
+    desc: 'NNUE WASM Local • Depth 15 • Top 2 biến',
+  },
+  {
+    id: 'cloud',
+    label: 'Lichess Cloud',
+    desc: 'Stockfish Cloud siêu sâu (depth 30–60+)',
+  },
+  {
+    id: 'jschess',
+    label: 'js-chess',
+    desc: 'Open-source JS Engine (MIT)',
   },
   {
     id: 'classical',
@@ -71,8 +101,8 @@ const ENGINE_MODES: Array<{ id: EngineMode; label: string; desc: string }> = [
   },
   {
     id: 'compare',
-    label: 'So sánh 2 Engine',
-    desc: 'Stockfish vs PeSTO',
+    label: 'So sánh 3 Engine',
+    desc: 'Stockfish + PeSTO + js-chess',
   },
 ]
 
@@ -227,7 +257,38 @@ export function App() {
   const [showBestMoveArrow, setShowBestMoveArrow] = useState<boolean>(true)
   const [sfEvaluation, setSfEvaluation] =
     useState<EngineEvaluation>(INITIAL_EVALUATION)
+  const [workerResults, setWorkerResults] = useState<
+    Partial<Record<WorkerEngineStyle, { fen: string; result: LocalEngineResult }>>
+  >({})
+  const [cloudState, setCloudState] = useState<{
+    fen: string
+    loading: boolean
+    result: LichessCloudEvalResult | null
+    error: string | null
+  }>({
+    fen: DEFAULT_POSITION,
+    loading: false,
+    result: null,
+    error: null,
+  })
   const engineRef = useRef<StockfishService | null>(null)
+  const classicalWorkerRef = useRef<Worker | null>(null)
+  const classicalReqIdRef = useRef<Record<WorkerEngineStyle, number>>({
+    classical: 0,
+    aggressive: 0,
+    jschess: 0,
+  })
+
+  // Full Game Review state (Win-Rate Graph & Blunder/Mistake/Best badges)
+  const [reviewResult, setReviewResult] = useState<GameReviewResult | null>(
+    null,
+  )
+  const [reviewProgress, setReviewProgress] = useState<{
+    completed: number
+    total: number
+  } | null>(null)
+  const [reviewError, setReviewError] = useState<string | null>(null)
+  const reviewAbortRef = useRef<AbortController | null>(null)
 
   const activeMoveRef = useRef<HTMLButtonElement>(null)
 
@@ -253,12 +314,26 @@ export function App() {
         }
       : null
 
+  // Map ply -> ReviewMoveInfo for O(1) lookup in move list
+  const reviewMoveMap = useMemo(() => {
+    const map = new Map<number, ReviewMoveInfo>()
+    if (reviewResult) {
+      for (const m of reviewResult.moves) {
+        map.set(m.ply, m)
+      }
+    }
+    return map
+  }, [reviewResult])
+
+  const currentReviewMove =
+    viewIndex > 0 ? reviewMoveMap.get(viewIndex) ?? null : null
+
   const needsStockfish =
     engineEnabled &&
     !isGameOver &&
     (engineMode === 'stockfish' || engineMode === 'compare')
 
-  // Lifecycle: start Stockfish Worker once
+  // Lifecycle: start Stockfish Worker & Classical PeSTO Web Worker once
   useEffect(() => {
     const service = new StockfishService()
     engineRef.current = service
@@ -266,13 +341,33 @@ export function App() {
       setSfEvaluation(nextEval)
     })
 
+    const classicalWorker = new Worker(
+      new URL('./engine/classicalWorker.ts', import.meta.url),
+      { type: 'module' },
+    )
+    classicalWorker.onmessage = (
+      event: MessageEvent<ClassicalWorkerResponse>,
+    ) => {
+      const { id, fen: resFen, style, result } = event.data
+      if (id === classicalReqIdRef.current[style]) {
+        setWorkerResults((prev) => ({
+          ...prev,
+          [style]: { fen: resFen, result },
+        }))
+      }
+    }
+    classicalWorkerRef.current = classicalWorker
+
     return () => {
       service.destroy()
       engineRef.current = null
+      classicalWorker.terminate()
+      classicalWorkerRef.current = null
+      reviewAbortRef.current?.abort()
     }
   }, [])
 
-  // Trigger Stockfish analysis when needed
+  // Trigger Stockfish analysis when needed (short debounce keeps rapid PGN scrubbing smooth)
   useEffect(() => {
     const service = engineRef.current
     if (!service) return
@@ -282,21 +377,103 @@ export function App() {
       return
     }
 
-    const multiPv = engineMode === 'stockfish' ? 2 : 1
-    service.analyze(fen, ENGINE_DEPTH, multiPv)
+    const timer = window.setTimeout(() => {
+      const multiPv = engineMode === 'stockfish' ? 2 : 1
+      service.analyze(fen, ENGINE_DEPTH, multiPv)
+    }, 45)
+
+    return () => window.clearTimeout(timer)
   }, [fen, needsStockfish, engineMode])
 
-  // Local Classical PeSTO / Aggressive Engine analysis (fast depth-3 alpha-beta)
-  const localEngineResult: LocalEngineResult | null = useMemo(() => {
-    if (!engineEnabled || isGameOver) return null
-    if (engineMode === 'classical' || engineMode === 'compare') {
-      return analyzeWithLocalEngine(fen, 'classical', 3)
+  // Fetch Lichess Cloud Eval (depth 30-60+) when in 'cloud' mode
+  useEffect(() => {
+    if (!engineEnabled || isGameOver || engineMode !== 'cloud') return
+
+    const controller = new AbortController()
+    const timer = window.setTimeout(() => {
+      setCloudState({ fen, loading: true, result: null, error: null })
+      void fetchLichessCloudEval(fen, 3, controller.signal)
+        .then((res) => {
+          if (!controller.signal.aborted) {
+            setCloudState({ fen, loading: false, result: res, error: null })
+          }
+        })
+        .catch((err) => {
+          if (controller.signal.aborted) return
+          setCloudState({
+            fen,
+            loading: false,
+            result: null,
+            error:
+              err instanceof Error
+                ? err.message
+                : 'Không thể kết nối Lichess Cloud Eval.',
+          })
+        })
+    }, 120)
+
+    return () => {
+      window.clearTimeout(timer)
+      controller.abort()
     }
-    if (engineMode === 'aggressive') {
-      return analyzeWithLocalEngine(fen, 'aggressive', 3)
-    }
-    return null
   }, [fen, engineEnabled, engineMode, isGameOver])
+
+  // Run Classical PeSTO / Aggressive / js-chess-engine asynchronously in Web Worker
+  useEffect(() => {
+    const worker = classicalWorkerRef.current
+    if (!worker || !engineEnabled || isGameOver) return
+
+    const stylesToRun: WorkerEngineStyle[] =
+      engineMode === 'classical'
+        ? ['classical']
+        : engineMode === 'aggressive'
+          ? ['aggressive']
+          : engineMode === 'jschess'
+            ? ['jschess']
+            : engineMode === 'compare'
+              ? ['classical', 'jschess']
+              : []
+
+    if (stylesToRun.length === 0) return
+
+    const timer = window.setTimeout(() => {
+      for (const style of stylesToRun) {
+        const nextId = classicalReqIdRef.current[style] + 1
+        classicalReqIdRef.current[style] = nextId
+        const payload: ClassicalWorkerRequest = {
+          id: nextId,
+          fen,
+          style,
+          depth: 3,
+        }
+        worker.postMessage(payload)
+      }
+    }, 45)
+
+    return () => window.clearTimeout(timer)
+  }, [fen, engineEnabled, engineMode, isGameOver])
+
+  const classicalResult: LocalEngineResult | null =
+    workerResults.classical?.fen === fen ? workerResults.classical.result : null
+  const aggressiveResult: LocalEngineResult | null =
+    workerResults.aggressive?.fen === fen
+      ? workerResults.aggressive.result
+      : null
+  const jsChessResult: LocalEngineResult | null =
+    workerResults.jschess?.fen === fen ? workerResults.jschess.result : null
+  const activeCloudResult =
+    cloudState.fen === fen ? cloudState.result : null
+  const isCloudLoading = cloudState.fen === fen && cloudState.loading
+  const cloudError = cloudState.fen === fen ? cloudState.error : null
+
+  const activeSingleLocalResult: LocalEngineResult | null =
+    engineMode === 'classical'
+      ? classicalResult
+      : engineMode === 'aggressive'
+        ? aggressiveResult
+        : engineMode === 'jschess'
+          ? jsChessResult
+          : null
 
   // Choose primary evaluation for EvaluationBar based on active engine mode
   const activeEvalForBar: EngineEvaluation = (() => {
@@ -318,18 +495,29 @@ export function App() {
         isSearching: false,
       }
     }
-    if (
-      (engineMode === 'classical' || engineMode === 'aggressive') &&
-      localEngineResult
-    ) {
+    if (engineMode === 'cloud' && activeCloudResult?.lines[0]) {
+      const top = activeCloudResult.lines[0]
       return {
         ...INITIAL_EVALUATION,
-        cp: localEngineResult.cp,
-        mate: localEngineResult.mate,
-        depth: localEngineResult.depth,
-        targetDepth: localEngineResult.depth,
-        bestMove: localEngineResult.bestMove,
-        pv: localEngineResult.pv,
+        cp: top.cp,
+        mate: top.mate,
+        depth: activeCloudResult.depth,
+        targetDepth: activeCloudResult.depth,
+        bestMove: top.moves[0] ?? null,
+        pv: top.moves,
+        isSearching: false,
+        isReady: true,
+      }
+    }
+    if (activeSingleLocalResult) {
+      return {
+        ...INITIAL_EVALUATION,
+        cp: activeSingleLocalResult.cp,
+        mate: activeSingleLocalResult.mate,
+        depth: activeSingleLocalResult.depth,
+        targetDepth: activeSingleLocalResult.depth,
+        bestMove: activeSingleLocalResult.bestMove,
+        pv: activeSingleLocalResult.pv,
         isSearching: false,
         isReady: true,
       }
@@ -337,44 +525,36 @@ export function App() {
     return sfEvaluation
   })()
 
-  // Build engine suggestion arrows (supports 2 distinct colored arrows in Compare mode!)
+  // Build engine suggestion arrows (supports up to 3 distinct colored arrows in Compare mode!)
   const engineArrows: BoardArrow[] = (() => {
     if (!engineEnabled || !showBestMoveArrow || isGameOver) return []
     const arrows: BoardArrow[] = []
 
-    if (engineMode === 'stockfish' || engineMode === 'compare') {
-      const sfBest = parseUciMove(sfEvaluation.bestMove)
-      if (sfBest) {
-        arrows.push({
-          from: sfBest.from,
-          to: sfBest.to,
-          color: '#16a34a', // Green for Stockfish 19
-          opacity: 0.8,
-        })
+    const pushUnique = (uci: string | null, color: string, opacity = 0.8) => {
+      const parsed = parseUciMove(uci)
+      if (!parsed) return
+      const duplicate = arrows.some(
+        (a) => a.from === parsed.from && a.to === parsed.to,
+      )
+      if (!duplicate) {
+        arrows.push({ from: parsed.from, to: parsed.to, color, opacity })
       }
     }
 
-    if (
-      (engineMode === 'classical' ||
-        engineMode === 'aggressive' ||
-        engineMode === 'compare') &&
-      localEngineResult?.bestMove
-    ) {
-      const localBest = parseUciMove(localEngineResult.bestMove)
-      if (localBest) {
-        const sameAsSf =
-          arrows.length > 0 &&
-          arrows[0].from === localBest.from &&
-          arrows[0].to === localBest.to
-        if (!sameAsSf) {
-          arrows.push({
-            from: localBest.from,
-            to: localBest.to,
-            color: engineMode === 'aggressive' ? '#f97316' : '#3b82f6', // Blue for PeSTO, Orange for Aggressive
-            opacity: 0.78,
-          })
-        }
-      }
+    if (engineMode === 'stockfish' || engineMode === 'compare') {
+      pushUnique(sfEvaluation.bestMove, '#16a34a', 0.82) // Green: Stockfish 19
+    }
+    if (engineMode === 'cloud') {
+      pushUnique(activeCloudResult?.lines[0]?.moves[0] ?? null, '#06b6d4', 0.84) // Cyan: Lichess Cloud
+    }
+    if (engineMode === 'classical' || engineMode === 'compare') {
+      pushUnique(classicalResult?.bestMove ?? null, '#3b82f6', 0.78) // Blue: PeSTO
+    }
+    if (engineMode === 'jschess' || engineMode === 'compare') {
+      pushUnique(jsChessResult?.bestMove ?? null, '#a855f7', 0.78) // Purple: js-chess-engine
+    }
+    if (engineMode === 'aggressive') {
+      pushUnique(aggressiveResult?.bestMove ?? null, '#f97316', 0.82) // Orange: Aggressive
     }
 
     return arrows
@@ -467,6 +647,54 @@ export function App() {
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [importModalTab, moves.length, soundEnabled])
 
+  const cancelReview = () => {
+    reviewAbortRef.current?.abort()
+    reviewAbortRef.current = null
+    setReviewProgress(null)
+  }
+
+  const clearReview = () => {
+    cancelReview()
+    setReviewResult(null)
+    setReviewError(null)
+  }
+
+  const startGameReview = async (
+    targetStartFen = startFen,
+    targetMoves = moves,
+  ) => {
+    if (targetMoves.length === 0) return
+
+    cancelReview()
+    const controller = new AbortController()
+    reviewAbortRef.current = controller
+    setReviewError(null)
+    setReviewResult(null)
+    setReviewProgress({ completed: 0, total: targetMoves.length + 1 })
+
+    try {
+      const result = await runFullGameReview(targetStartFen, targetMoves, {
+        depth: 12,
+        signal: controller.signal,
+        onProgress: (completed, total) => {
+          setReviewProgress({ completed, total })
+        },
+      })
+      if (!controller.signal.aborted) {
+        setReviewResult(result)
+        setReviewProgress(null)
+      }
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') return
+      setReviewError(
+        err instanceof Error
+          ? err.message
+          : 'Không thể hoàn tất phân tích toàn ván.',
+      )
+      setReviewProgress(null)
+    }
+  }
+
   const legalMovesForSelected = selectedSquare
     ? displayGame.moves({ square: selectedSquare, verbose: true })
     : []
@@ -490,6 +718,7 @@ export function App() {
       playSoundForMove(executed, nextGame)
     }
 
+    clearReview()
     setMoves(updatedMoves)
     setViewIndex(updatedMoves.length)
     setSelectedSquare(null)
@@ -540,6 +769,7 @@ export function App() {
 
   const handleUndo = () => {
     if (viewIndex === 0) return
+    clearReview()
     const nextMoves = moves.slice(0, viewIndex - 1)
     setMoves(nextMoves)
     setViewIndex(nextMoves.length)
@@ -549,6 +779,7 @@ export function App() {
   }
 
   const handleReset = () => {
+    clearReview()
     setStartFen(DEFAULT_POSITION)
     setMoves([])
     setViewIndex(0)
@@ -559,6 +790,7 @@ export function App() {
   }
 
   const handleImportFen = (loadedFen: string) => {
+    clearReview()
     setStartFen(loadedFen)
     setMoves([])
     setViewIndex(0)
@@ -568,7 +800,17 @@ export function App() {
     setSelectedSquare(null)
   }
 
-  const handleImportPgn = (pgnText: string) => {
+  const loadPgnInternal = (
+    pgnText: string,
+    opts?: {
+      autoReview?: boolean
+      orientation?: 'w' | 'b'
+      fallbackWhite?: string
+      fallbackBlack?: string
+      metaOverride?: string
+    },
+  ) => {
+    clearReview()
     const parsed = new Chess()
     parsed.loadPgn(pgnText)
     const headers = parsed.getHeaders()
@@ -586,23 +828,54 @@ export function App() {
     setStartFen(customStartFen)
     setMoves(importedMoves)
     setViewIndex(0)
+    if (opts?.orientation) {
+      setOrientation(opts.orientation)
+    }
     setPlayers({
       white:
         headers.White && headers.White !== '?'
           ? headers.White
-          : DEFAULT_PLAYERS.white,
+          : opts?.fallbackWhite ?? DEFAULT_PLAYERS.white,
       black:
         headers.Black && headers.Black !== '?'
           ? headers.Black
-          : DEFAULT_PLAYERS.black,
+          : opts?.fallbackBlack ?? DEFAULT_PLAYERS.black,
     })
 
-    const metaParts = [headers.Event, headers.Date?.slice(0, 4)].filter(
-      (v) => v && v !== '?' && v !== '????',
-    )
-    setGameMeta(metaParts.length > 0 ? metaParts.join(' • ') : 'Ván đấu PGN')
+    if (opts?.metaOverride) {
+      setGameMeta(opts.metaOverride)
+    } else {
+      const metaParts = [headers.Event, headers.Date?.slice(0, 4)].filter(
+        (v) => v && v !== '?' && v !== '????',
+      )
+      setGameMeta(metaParts.length > 0 ? metaParts.join(' • ') : 'Ván đấu PGN')
+    }
+
     setPendingPromotion(null)
     setSelectedSquare(null)
+
+    if (opts?.autoReview && importedMoves.length > 0) {
+      void startGameReview(customStartFen, importedMoves)
+    }
+  }
+
+  const handleImportPgn = (pgnText: string, autoReview = false) => {
+    loadPgnInternal(pgnText, { autoReview })
+  }
+
+  const handleImportOnlineGame = (game: OnlineGameSummary) => {
+    const platformLabel = game.platform === 'chesscom' ? 'Chess.com' : 'Lichess'
+    const meta = [platformLabel, game.timeControl.toUpperCase(), game.dateLabel]
+      .filter(Boolean)
+      .join(' • ')
+
+    loadPgnInternal(game.pgn, {
+      autoReview: true,
+      orientation: game.userColor,
+      fallbackWhite: game.whiteName,
+      fallbackBlack: game.blackName,
+      metaOverride: meta,
+    })
   }
 
   const jumpToPly = (ply: number) => {
@@ -653,12 +926,30 @@ export function App() {
                 JustChess
               </h1>
               <p className="text-[11px] text-stone-400">
-                {gameMeta ?? 'Bàn cờ chuẩn thi đấu • Đa Engine'}
+                {gameMeta ?? 'Bàn cờ chuẩn thi đấu • Đa Engine & Game Review'}
               </p>
             </div>
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
+            {/* Search Lichess / Chess.com */}
+            <button
+              type="button"
+              onClick={() => setImportModalTab('online')}
+              className="rounded-lg bg-[#81b64c] px-3 py-1.5 text-xs font-bold text-[#161512] shadow-sm transition hover:bg-[#95c75d]"
+            >
+              🔍 Lichess / Chess.com
+            </button>
+
+            {/* Import FEN / PGN trigger */}
+            <button
+              type="button"
+              onClick={() => setImportModalTab('pgn')}
+              className="rounded-lg bg-[#302e2b] px-3 py-1.5 text-xs font-semibold text-stone-100 ring-1 ring-white/10 transition hover:bg-[#3d3a36]"
+            >
+              ⇪ FEN / PGN
+            </button>
+
             {/* Sound toggle */}
             <button
               type="button"
@@ -671,16 +962,7 @@ export function App() {
                   : 'bg-[#161512] text-stone-500 ring-white/5 hover:text-stone-300',
               ].join(' ')}
             >
-              {soundEnabled ? '🔊 Âm thanh' : '🔇 Tắt tiếng'}
-            </button>
-
-            {/* Import FEN / PGN trigger */}
-            <button
-              type="button"
-              onClick={() => setImportModalTab('pgn')}
-              className="rounded-lg bg-[#302e2b] px-3 py-1.5 text-xs font-semibold text-stone-100 ring-1 ring-white/10 transition hover:bg-[#3d3a36]"
-            >
-              ⇪ Import FEN / PGN
+              {soundEnabled ? '🔊' : '🔇'}
             </button>
 
             {/* Theme switcher */}
@@ -695,7 +977,7 @@ export function App() {
                     onClick={() => setThemeId(id)}
                     title={t.name}
                     className={[
-                      'flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition',
+                      'flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium transition',
                       active
                         ? 'bg-[#302e2b] text-white shadow-sm'
                         : 'text-stone-400 hover:text-stone-200',
@@ -707,7 +989,7 @@ export function App() {
                       <span style={{ backgroundColor: t.dark }} />
                       <span style={{ backgroundColor: t.light }} />
                     </span>
-                    <span className="hidden md:inline">{t.name}</span>
+                    <span className="hidden xl:inline">{t.name}</span>
                   </button>
                 )
               })}
@@ -717,7 +999,7 @@ export function App() {
       </header>
 
       {/* Main Arena */}
-      <main className="mx-auto grid max-w-6xl items-start gap-6 px-4 py-6 lg:grid-cols-[minmax(0,636px)_360px] lg:justify-center">
+      <main className="mx-auto grid max-w-6xl items-start gap-6 px-4 py-6 lg:grid-cols-[minmax(0,636px)_370px] lg:justify-center">
         {/* Left column: Evaluation Bar + Player Bars + Chessboard */}
         <section className="flex flex-col items-center gap-2.5">
           {/* Top PlayerBar aligned with chessboard */}
@@ -804,11 +1086,11 @@ export function App() {
         </section>
 
         {/* Right column: Lichess / Chess.com Sidebar */}
-        <aside className="flex w-full flex-col overflow-hidden rounded-xl bg-[#262421] shadow-xl ring-1 ring-white/5 lg:h-[716px]">
+        <aside className="flex w-full flex-col overflow-hidden rounded-xl bg-[#262421] shadow-xl ring-1 ring-white/5 lg:max-h-[760px] lg:min-h-[716px]">
           {/* Status Header */}
           <div
             className={[
-              'flex items-center justify-between gap-2 border-b border-white/5 px-4 py-3 text-sm font-semibold',
+              'flex items-center justify-between gap-2 border-b border-white/5 px-4 py-2.5 text-sm font-semibold',
               status.tone === 'over'
                 ? 'bg-[#81b64c]/15 text-[#a3d160]'
                 : status.tone === 'check'
@@ -823,6 +1105,100 @@ export function App() {
               </span>
             )}
           </div>
+
+          {/* Full Game Review & Win-Rate Graph Section */}
+          {moves.length > 0 && (
+            <div className="border-b border-white/5 bg-[#1b1917] px-3.5 py-2.5">
+              {reviewProgress ? (
+                <div className="flex flex-col gap-1.5">
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="font-medium text-stone-200">
+                      Đang phân tích toàn ván ({reviewProgress.completed}/
+                      {reviewProgress.total})
+                    </span>
+                    <button
+                      type="button"
+                      onClick={cancelReview}
+                      className="rounded bg-[#302e2b] px-2 py-0.5 text-[11px] text-stone-300 hover:bg-[#3d3a36]"
+                    >
+                      Dừng
+                    </button>
+                  </div>
+                  <div className="h-2 overflow-hidden rounded-full bg-[#302e2b]">
+                    <div
+                      className="h-full bg-[#81b64c] transition-[width] duration-200"
+                      style={{
+                        width: `${Math.round((reviewProgress.completed / Math.max(1, reviewProgress.total)) * 100)}%`,
+                      }}
+                    />
+                  </div>
+                </div>
+              ) : reviewResult ? (
+                <div className="flex flex-col gap-2">
+                  <WinRateGraph
+                    review={reviewResult}
+                    currentPly={viewIndex}
+                    onSelectPly={jumpToPly}
+                  />
+                  {currentReviewMove && (
+                    <div
+                      className="flex items-center justify-between rounded px-2.5 py-1 text-xs"
+                      style={{
+                        backgroundColor:
+                          CLASSIFICATION_META[currentReviewMove.classification]
+                            .bg,
+                      }}
+                    >
+                      <span className="font-semibold text-stone-100">
+                        {currentReviewMove.san}{' '}
+                        <span
+                          style={{
+                            color:
+                              CLASSIFICATION_META[
+                                currentReviewMove.classification
+                              ].color,
+                          }}
+                        >
+                          {
+                            CLASSIFICATION_META[
+                              currentReviewMove.classification
+                            ].symbol
+                          }{' '}
+                          {
+                            CLASSIFICATION_META[
+                              currentReviewMove.classification
+                            ].label
+                          }
+                        </span>
+                      </span>
+                      {currentReviewMove.winLoss >= 1 && (
+                        <span className="font-mono text-[11px] text-stone-300">
+                          -{Math.round(currentReviewMove.winLoss)}% Win
+                        </span>
+                      )}
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[11px] text-stone-400">
+                    Chấm điểm Best / Mistake / Blunder &amp; vẽ Win-Rate
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => void startGameReview()}
+                    className="shrink-0 rounded-md bg-[#81b64c] px-2.5 py-1 text-[11px] font-bold text-[#161512] transition hover:bg-[#95c75d]"
+                  >
+                    📊 Phân tích ván
+                  </button>
+                </div>
+              )}
+
+              {reviewError && (
+                <p className="mt-1.5 text-[11px] text-red-400">{reviewError}</p>
+              )}
+            </div>
+          )}
 
           {/* Multi-Engine Analysis Panel */}
           <div className="border-b border-white/5 bg-[#1e1c1a] px-3.5 py-2.5">
@@ -879,7 +1255,7 @@ export function App() {
             {engineEnabled && (
               <>
                 {/* Engine Mode Selector */}
-                <div className="mt-2 grid grid-cols-2 gap-1 rounded-lg bg-[#161512] p-1 ring-1 ring-white/5">
+                <div className="mt-2 grid grid-cols-3 gap-1 rounded-lg bg-[#161512] p-1 ring-1 ring-white/5">
                   {ENGINE_MODES.map((m) => (
                     <button
                       key={m.id}
@@ -887,7 +1263,7 @@ export function App() {
                       onClick={() => setEngineMode(m.id)}
                       title={m.desc}
                       className={[
-                        'rounded-md px-2 py-1 text-[11px] font-medium transition',
+                        'truncate rounded-md px-1.5 py-1 text-[11px] font-medium transition',
                         engineMode === m.id
                           ? 'bg-[#302e2b] text-white shadow-sm'
                           : 'text-stone-400 hover:text-stone-200',
@@ -943,10 +1319,71 @@ export function App() {
                         </div>
                       )}
 
-                      {/* Classical PeSTO or Aggressive single engine output */}
+                      {/* Lichess Cloud Eval (Depth 30-60+) */}
+                      {engineMode === 'cloud' && (
+                        <div className="flex flex-col gap-1">
+                          {isCloudLoading ? (
+                            <span className="text-[11px] text-stone-400">
+                              Đang tra cứu Lichess Cloud Eval...
+                            </span>
+                          ) : cloudError ? (
+                            <span className="text-[11px] text-red-400">
+                              {cloudError}
+                            </span>
+                          ) : !activeCloudResult ? (
+                            <div className="rounded bg-[#262421] px-2.5 py-2 text-[11px] text-stone-400">
+                              Thế cờ này chưa có trong bộ nhớ Cloud của Lichess.
+                              Hãy chuyển sang{' '}
+                              <button
+                                type="button"
+                                onClick={() => setEngineMode('stockfish')}
+                                className="font-semibold text-[#a3d160] underline"
+                              >
+                                Stockfish 19 Local
+                              </button>{' '}
+                              để phân tích trực tiếp.
+                            </div>
+                          ) : (
+                            <>
+                              <div className="flex items-center justify-between px-1 text-[10px] text-stone-400">
+                                <span>
+                                  Lichess Cloud • Depth{' '}
+                                  <strong className="text-cyan-400">
+                                    {activeCloudResult.depth}
+                                  </strong>
+                                </span>
+                                <span className="font-mono">
+                                  {Math.round(activeCloudResult.knodes / 1000)}M
+                                  nodes
+                                </span>
+                              </div>
+                              {activeCloudResult.lines.map((line, idx) => (
+                                <button
+                                  key={idx}
+                                  type="button"
+                                  onClick={() =>
+                                    playUciMoveIfValid(line.moves[0] ?? null)
+                                  }
+                                  className="flex items-center gap-2 rounded bg-[#262421] px-2 py-1 text-left transition hover:bg-[#302e2b]"
+                                >
+                                  <span className="w-11 shrink-0 rounded bg-[#161512] py-0.5 text-center font-mono text-[11px] font-bold text-cyan-400">
+                                    {formatEvaluationScore(line)}
+                                  </span>
+                                  <span className="truncate font-mono text-[11px] text-stone-200">
+                                    {uciLineToSan(fen, line.moves, 5)}
+                                  </span>
+                                </button>
+                              ))}
+                            </>
+                          )}
+                        </div>
+                      )}
+
+                      {/* Single local worker engine output (PeSTO / Aggressive / js-chess-engine) */}
                       {(engineMode === 'classical' ||
-                        engineMode === 'aggressive') &&
-                        localEngineResult && (
+                        engineMode === 'aggressive' ||
+                        engineMode === 'jschess') &&
+                        (activeSingleLocalResult ? (
                           <div className="flex flex-col gap-1.5 rounded bg-[#262421] p-2">
                             <div className="flex items-center justify-between gap-2">
                               <div className="flex items-center gap-2">
@@ -955,30 +1392,34 @@ export function App() {
                                     'rounded bg-[#161512] px-2 py-0.5 font-mono text-[11px] font-bold',
                                     engineMode === 'aggressive'
                                       ? 'text-orange-400'
-                                      : 'text-sky-400',
+                                      : engineMode === 'jschess'
+                                        ? 'text-purple-400'
+                                        : 'text-sky-400',
                                   ].join(' ')}
                                 >
-                                  {formatEvaluationScore(localEngineResult)}
+                                  {formatEvaluationScore(
+                                    activeSingleLocalResult,
+                                  )}
                                 </span>
                                 <span className="text-[11px] text-stone-400">
-                                  Depth {localEngineResult.depth}
+                                  Depth {activeSingleLocalResult.depth}
                                 </span>
                               </div>
-                              {localEngineResult.bestMoveSan && (
+                              {activeSingleLocalResult.bestMoveSan && (
                                 <button
                                   type="button"
                                   onClick={() =>
                                     playUciMoveIfValid(
-                                      localEngineResult.bestMove,
+                                      activeSingleLocalResult.bestMove,
                                     )
                                   }
                                   className="rounded bg-[#302e2b] px-2 py-0.5 font-mono text-[11px] font-semibold text-stone-100 transition hover:bg-[#3d3a36]"
                                 >
-                                  Best: {localEngineResult.bestMoveSan}
+                                  Best: {activeSingleLocalResult.bestMoveSan}
                                 </button>
                               )}
                             </div>
-                            {localEngineResult.insights.map((note) => (
+                            {activeSingleLocalResult.insights.map((note) => (
                               <p
                                 key={note}
                                 className="text-[11px] text-stone-400"
@@ -987,9 +1428,13 @@ export function App() {
                               </p>
                             ))}
                           </div>
-                        )}
+                        ) : (
+                          <span className="text-[11px] text-stone-400">
+                            Đang tính toán trên Web Worker...
+                          </span>
+                        ))}
 
-                      {/* Side-by-side Compare mode: Stockfish 19 vs Classical PeSTO */}
+                      {/* Side-by-side Compare mode: Stockfish 19 vs PeSTO vs js-chess-engine */}
                       {engineMode === 'compare' && (
                         <div className="flex flex-col gap-1">
                           <div className="flex items-center justify-between gap-2 rounded bg-[#262421] px-2 py-1.5">
@@ -1020,37 +1465,65 @@ export function App() {
                             </div>
                           </div>
 
-                          {localEngineResult && (
-                            <div className="flex items-center justify-between gap-2 rounded bg-[#262421] px-2 py-1.5">
-                              <div className="flex items-center gap-1.5">
-                                <span className="h-2.5 w-2.5 rounded-full bg-blue-500" />
-                                <span className="text-[11px] font-semibold text-stone-200">
-                                  PeSTO Cổ điển
-                                </span>
-                                <span className="font-mono text-[10px] text-stone-500">
-                                  d{localEngineResult.depth}
-                                </span>
-                              </div>
-                              <div className="flex items-center gap-1.5">
-                                <span className="font-mono text-[11px] font-bold text-sky-400">
-                                  {formatEvaluationScore(localEngineResult)}
-                                </span>
-                                {localEngineResult.bestMoveSan && (
-                                  <button
-                                    type="button"
-                                    onClick={() =>
-                                      playUciMoveIfValid(
-                                        localEngineResult.bestMove,
-                                      )
-                                    }
-                                    className="rounded bg-[#302e2b] px-1.5 py-0.5 font-mono text-[11px] text-stone-100 hover:bg-[#3d3a36]"
-                                  >
-                                    {localEngineResult.bestMoveSan}
-                                  </button>
-                                )}
-                              </div>
+                          <div className="flex items-center justify-between gap-2 rounded bg-[#262421] px-2 py-1.5">
+                            <div className="flex items-center gap-1.5">
+                              <span className="h-2.5 w-2.5 rounded-full bg-blue-500" />
+                              <span className="text-[11px] font-semibold text-stone-200">
+                                PeSTO Cổ điển
+                              </span>
+                              <span className="font-mono text-[10px] text-stone-500">
+                                d3
+                              </span>
                             </div>
-                          )}
+                            <div className="flex items-center gap-1.5">
+                              <span className="font-mono text-[11px] font-bold text-sky-400">
+                                {classicalResult
+                                  ? formatEvaluationScore(classicalResult)
+                                  : '...'}
+                              </span>
+                              {classicalResult?.bestMoveSan && (
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    playUciMoveIfValid(classicalResult.bestMove)
+                                  }
+                                  className="rounded bg-[#302e2b] px-1.5 py-0.5 font-mono text-[11px] text-stone-100 hover:bg-[#3d3a36]"
+                                >
+                                  {classicalResult.bestMoveSan}
+                                </button>
+                              )}
+                            </div>
+                          </div>
+
+                          <div className="flex items-center justify-between gap-2 rounded bg-[#262421] px-2 py-1.5">
+                            <div className="flex items-center gap-1.5">
+                              <span className="h-2.5 w-2.5 rounded-full bg-purple-500" />
+                              <span className="text-[11px] font-semibold text-stone-200">
+                                js-chess-engine
+                              </span>
+                              <span className="font-mono text-[10px] text-stone-500">
+                                MIT
+                              </span>
+                            </div>
+                            <div className="flex items-center gap-1.5">
+                              <span className="font-mono text-[11px] font-bold text-purple-400">
+                                {jsChessResult
+                                  ? formatEvaluationScore(jsChessResult)
+                                  : '...'}
+                              </span>
+                              {jsChessResult?.bestMoveSan && (
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    playUciMoveIfValid(jsChessResult.bestMove)
+                                  }
+                                  className="rounded bg-[#302e2b] px-1.5 py-0.5 font-mono text-[11px] text-stone-100 hover:bg-[#3d3a36]"
+                                >
+                                  {jsChessResult.bestMoveSan}
+                                </button>
+                              )}
+                            </div>
+                          </div>
                         </div>
                       )}
                     </>
@@ -1062,7 +1535,7 @@ export function App() {
 
           {/* Reviewing banner if not at latest ply */}
           {isReviewingEarlier && (
-            <div className="flex items-center justify-between border-b border-amber-500/20 bg-amber-500/10 px-4 py-1.5 text-[11px] text-amber-300">
+            <div className="flex items-center justify-between border-b border-amber-500/20 bg-amber-500/10 px-4 py-1 text-[11px] text-amber-300">
               <span>
                 Đang xem lại nước {viewIndex}/{moves.length}
               </span>
@@ -1077,22 +1550,22 @@ export function App() {
           )}
 
           {/* Move List Table */}
-          <div className="min-h-40 flex-1 overflow-y-auto px-2 py-2">
+          <div className="min-h-36 flex-1 overflow-y-auto px-2 py-2">
             {moveRows.length === 0 ? (
               <div className="flex h-full flex-col items-center justify-center gap-2 py-8 text-center text-stone-500">
                 <p className="text-sm font-medium text-stone-400">
-                  Sẵn sàng bắt đầu
+                  Sẵn sàng phân tích
                 </p>
-                <p className="max-w-[240px] text-xs">
-                  Kéo thả quân cờ để đi, hoặc nạp thế cờ FEN / dán PGN để phân tích.
+                <p className="max-w-[260px] text-xs">
+                  Tìm tài khoản Lichess / Chess.com, dán PGN hoặc kéo thả quân cờ để bắt đầu.
                 </p>
-                <div className="mt-2 flex gap-2">
+                <div className="mt-2 flex flex-wrap justify-center gap-2">
                   <button
                     type="button"
-                    onClick={() => setImportModalTab('fen')}
-                    className="rounded-md bg-[#302e2b] px-2.5 py-1.5 text-xs font-medium text-stone-200 transition hover:bg-[#3d3a36]"
+                    onClick={() => setImportModalTab('online')}
+                    className="rounded-md bg-[#81b64c] px-2.5 py-1.5 text-xs font-bold text-[#161512] transition hover:bg-[#95c75d]"
                   >
-                    Tải FEN
+                    🔍 Lichess / Chess.com
                   </button>
                   <button
                     type="button"
@@ -1105,55 +1578,114 @@ export function App() {
               </div>
             ) : (
               <div className="font-mono text-sm">
-                {moveRows.map((row, idx) => (
-                  <div
-                    key={`${row.moveNumber}-${idx}`}
-                    className={[
-                      'grid grid-cols-[42px_1fr_1fr] items-center rounded px-1.5 py-0.5',
-                      idx % 2 === 1 ? 'bg-white/[0.025]' : '',
-                    ].join(' ')}
-                  >
-                    <span className="text-xs text-stone-500">
-                      {row.moveNumber}.
-                    </span>
+                {moveRows.map((row, idx) => {
+                  const whiteReview = row.white
+                    ? reviewMoveMap.get(row.white.ply)
+                    : undefined
+                  const blackReview = row.black
+                    ? reviewMoveMap.get(row.black.ply)
+                    : undefined
 
-                    {row.white ? (
-                      <button
-                        ref={viewIndex === row.white.ply ? activeMoveRef : null}
-                        type="button"
-                        onClick={() => jumpToPly(row.white!.ply)}
-                        className={[
-                          'rounded px-2 py-1 text-left font-medium transition',
-                          viewIndex === row.white.ply
-                            ? 'bg-[#81b64c]/30 text-[#d4f2ab]'
-                            : 'text-stone-200 hover:bg-white/10',
-                        ].join(' ')}
-                      >
-                        {row.white.san}
-                      </button>
-                    ) : (
-                      <span className="px-2 py-1 text-stone-600">...</span>
-                    )}
+                  return (
+                    <div
+                      key={`${row.moveNumber}-${idx}`}
+                      className={[
+                        'grid grid-cols-[40px_1fr_1fr] items-center rounded px-1.5 py-0.5',
+                        idx % 2 === 1 ? 'bg-white/[0.025]' : '',
+                      ].join(' ')}
+                    >
+                      <span className="text-xs text-stone-500">
+                        {row.moveNumber}.
+                      </span>
 
-                    {row.black ? (
-                      <button
-                        ref={viewIndex === row.black.ply ? activeMoveRef : null}
-                        type="button"
-                        onClick={() => jumpToPly(row.black!.ply)}
-                        className={[
-                          'rounded px-2 py-1 text-left font-medium transition',
-                          viewIndex === row.black.ply
-                            ? 'bg-[#81b64c]/30 text-[#d4f2ab]'
-                            : 'text-stone-300 hover:bg-white/10',
-                        ].join(' ')}
-                      >
-                        {row.black.san}
-                      </button>
-                    ) : (
-                      <span />
-                    )}
-                  </div>
-                ))}
+                      {row.white ? (
+                        <button
+                          ref={
+                            viewIndex === row.white.ply ? activeMoveRef : null
+                          }
+                          type="button"
+                          onClick={() => jumpToPly(row.white!.ply)}
+                          className={[
+                            'flex items-center justify-between gap-1 rounded px-2 py-1 text-left font-medium transition',
+                            viewIndex === row.white.ply
+                              ? 'bg-[#81b64c]/30 text-[#d4f2ab]'
+                              : 'text-stone-200 hover:bg-white/10',
+                          ].join(' ')}
+                        >
+                          <span>{row.white.san}</span>
+                          {whiteReview &&
+                            whiteReview.classification !== 'good' && (
+                              <span
+                                title={
+                                  CLASSIFICATION_META[
+                                    whiteReview.classification
+                                  ].label
+                                }
+                                style={{
+                                  color:
+                                    CLASSIFICATION_META[
+                                      whiteReview.classification
+                                    ].color,
+                                }}
+                                className="text-[11px] font-bold"
+                              >
+                                {
+                                  CLASSIFICATION_META[
+                                    whiteReview.classification
+                                  ].symbol
+                                }
+                              </span>
+                            )}
+                        </button>
+                      ) : (
+                        <span className="px-2 py-1 text-stone-600">...</span>
+                      )}
+
+                      {row.black ? (
+                        <button
+                          ref={
+                            viewIndex === row.black.ply ? activeMoveRef : null
+                          }
+                          type="button"
+                          onClick={() => jumpToPly(row.black!.ply)}
+                          className={[
+                            'flex items-center justify-between gap-1 rounded px-2 py-1 text-left font-medium transition',
+                            viewIndex === row.black.ply
+                              ? 'bg-[#81b64c]/30 text-[#d4f2ab]'
+                              : 'text-stone-300 hover:bg-white/10',
+                          ].join(' ')}
+                        >
+                          <span>{row.black.san}</span>
+                          {blackReview &&
+                            blackReview.classification !== 'good' && (
+                              <span
+                                title={
+                                  CLASSIFICATION_META[
+                                    blackReview.classification
+                                  ].label
+                                }
+                                style={{
+                                  color:
+                                    CLASSIFICATION_META[
+                                      blackReview.classification
+                                    ].color,
+                                }}
+                                className="text-[11px] font-bold"
+                              >
+                                {
+                                  CLASSIFICATION_META[
+                                    blackReview.classification
+                                  ].symbol
+                                }
+                              </span>
+                            )}
+                        </button>
+                      ) : (
+                        <span />
+                      )}
+                    </div>
+                  )
+                })}
               </div>
             )}
           </div>
@@ -1254,13 +1786,23 @@ export function App() {
         </aside>
       </main>
 
-      {/* Import FEN / PGN Modal */}
+      {/* Legal & Open-Source Attribution Footer (GPL-3.0 compliance) */}
+      <footer className="border-t border-white/5 bg-[#1b1917] px-4 py-3 text-center text-[11px] text-stone-500">
+        JustChess • Giấy phép{' '}
+        <span className="font-medium text-stone-400">GPL-3.0-or-later</span> •
+        Engine: Stockfish 19 (GPL-3.0), js-chess-engine (MIT), chess.js
+        (BSD-2-Clause) • Dự án độc lập, không liên kết chính thức với Lichess
+        hay Chess.com.
+      </footer>
+
+      {/* Import Online / PGN / FEN Modal */}
       {importModalTab !== null && (
         <ImportModal
           initialTab={importModalTab}
           currentFen={fen}
           onImportFen={handleImportFen}
           onImportPgn={handleImportPgn}
+          onImportOnlineGame={handleImportOnlineGame}
           onClose={() => setImportModalTab(null)}
         />
       )}

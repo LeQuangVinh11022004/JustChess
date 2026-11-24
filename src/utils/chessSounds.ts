@@ -6,8 +6,14 @@ export type ChessSoundType =
   | 'promote'
   | 'gameOver'
 
+/**
+ * Acoustic wooden chess piece sound synthesizer (Web Audio API).
+ * Models real wooden piece impacts using short bandpass-filtered noise transients
+ * layered with damped wooden board body resonance — zero external audio files needed.
+ */
 class ChessSoundManager {
   private ctx: AudioContext | null = null
+  private noiseBuffer: AudioBuffer | null = null
 
   private getContext(): AudioContext | null {
     if (typeof window === 'undefined') return null
@@ -25,6 +31,20 @@ class ChessSoundManager {
     return this.ctx
   }
 
+  private getNoiseBuffer(ctx: AudioContext): AudioBuffer {
+    if (this.noiseBuffer && this.noiseBuffer.sampleRate === ctx.sampleRate) {
+      return this.noiseBuffer
+    }
+    const length = Math.floor(ctx.sampleRate * 0.12)
+    const buffer = ctx.createBuffer(1, length, ctx.sampleRate)
+    const data = buffer.getChannelData(0)
+    for (let i = 0; i < length; i++) {
+      data[i] = Math.random() * 2 - 1
+    }
+    this.noiseBuffer = buffer
+    return buffer
+  }
+
   public play(type: ChessSoundType): void {
     const ctx = this.getContext()
     if (!ctx) return
@@ -33,115 +53,205 @@ class ChessSoundManager {
 
     switch (type) {
       case 'move':
-        this.playWoodTap(ctx, now, 180, 95, 0.06, 0.22)
+        // Crisp wooden piece placed cleanly on a wooden board ("tock")
+        this.playWoodImpact(ctx, now, {
+          clickFreq: 1150,
+          clickQ: 2.2,
+          clickGain: 0.42,
+          bodyStartFreq: 210,
+          bodyEndFreq: 95,
+          bodyGain: 0.28,
+          duration: 0.045,
+        })
         break
+
       case 'capture':
-        this.playWoodTap(ctx, now, 280, 75, 0.085, 0.32)
-        this.playNoiseBurst(ctx, now, 0.045, 0.16, 1400)
+        // Two-stage wooden clack: piece knocks piece, then lands firmly on board
+        this.playWoodImpact(ctx, now, {
+          clickFreq: 2150,
+          clickQ: 3.0,
+          clickGain: 0.45,
+          bodyStartFreq: 340,
+          bodyEndFreq: 160,
+          bodyGain: 0.22,
+          duration: 0.032,
+        })
+        this.playWoodImpact(ctx, now + 0.022, {
+          clickFreq: 980,
+          clickQ: 1.8,
+          clickGain: 0.55,
+          bodyStartFreq: 165,
+          bodyEndFreq: 72,
+          bodyGain: 0.36,
+          duration: 0.06,
+        })
         break
+
       case 'castle':
-        this.playWoodTap(ctx, now, 185, 95, 0.055, 0.22)
-        this.playWoodTap(ctx, now + 0.095, 220, 110, 0.06, 0.24)
+        // Two distinct wooden placements: King then Rook
+        this.playWoodImpact(ctx, now, {
+          clickFreq: 1080,
+          clickQ: 2.2,
+          clickGain: 0.4,
+          bodyStartFreq: 195,
+          bodyEndFreq: 88,
+          bodyGain: 0.27,
+          duration: 0.045,
+        })
+        this.playWoodImpact(ctx, now + 0.115, {
+          clickFreq: 1320,
+          clickQ: 2.4,
+          clickGain: 0.44,
+          bodyStartFreq: 235,
+          bodyEndFreq: 108,
+          bodyGain: 0.29,
+          duration: 0.045,
+        })
         break
+
       case 'promote':
-        this.playTone(ctx, now, 523.25, 0.09, 0.14, 'triangle')
-        this.playTone(ctx, now + 0.07, 659.25, 0.11, 0.16, 'triangle')
-        this.playTone(ctx, now + 0.14, 783.99, 0.16, 0.16, 'triangle')
+        // Firm wooden placement + subtle warm marimba chime
+        this.playWoodImpact(ctx, now, {
+          clickFreq: 1250,
+          clickQ: 2.2,
+          clickGain: 0.42,
+          bodyStartFreq: 220,
+          bodyEndFreq: 105,
+          bodyGain: 0.26,
+          duration: 0.045,
+        })
+        this.playMarimbaNote(ctx, now + 0.035, 587.33, 0.14, 0.16)
+        this.playMarimbaNote(ctx, now + 0.11, 880, 0.2, 0.18)
         break
+
       case 'check':
-        this.playWoodTap(ctx, now, 220, 90, 0.06, 0.22)
-        this.playTone(ctx, now + 0.02, 740, 0.12, 0.16, 'sine')
-        this.playTone(ctx, now + 0.1, 620, 0.14, 0.12, 'sine')
+        // Sharp wooden slap + tight percussive alert knock
+        this.playWoodImpact(ctx, now, {
+          clickFreq: 1550,
+          clickQ: 2.5,
+          clickGain: 0.5,
+          bodyStartFreq: 250,
+          bodyEndFreq: 95,
+          bodyGain: 0.3,
+          duration: 0.05,
+        })
+        this.playMarimbaNote(ctx, now + 0.025, 520, 0.11, 0.17)
+        this.playMarimbaNote(ctx, now + 0.085, 440, 0.13, 0.14)
         break
+
       case 'gameOver':
-        this.playTone(ctx, now, 440, 0.14, 0.15, 'triangle')
-        this.playTone(ctx, now + 0.13, 349.23, 0.16, 0.15, 'triangle')
-        this.playTone(ctx, now + 0.27, 261.63, 0.32, 0.18, 'triangle')
+        // Final wooden thud + resonant two-tone wooden cadence
+        this.playWoodImpact(ctx, now, {
+          clickFreq: 1050,
+          clickQ: 2.0,
+          clickGain: 0.42,
+          bodyStartFreq: 180,
+          bodyEndFreq: 80,
+          bodyGain: 0.3,
+          duration: 0.055,
+        })
+        this.playMarimbaNote(ctx, now + 0.08, 440, 0.18, 0.16)
+        this.playMarimbaNote(ctx, now + 0.21, 329.63, 0.32, 0.18)
         break
     }
   }
 
-  private playWoodTap(
+  private playWoodImpact(
     ctx: AudioContext,
     startTime: number,
-    startFreq: number,
-    endFreq: number,
-    duration: number,
-    volume: number,
+    opts: {
+      clickFreq: number
+      clickQ: number
+      clickGain: number
+      bodyStartFreq: number
+      bodyEndFreq: number
+      bodyGain: number
+      duration: number
+    },
   ): void {
-    const osc = ctx.createOscillator()
-    const gain = ctx.createGain()
+    // 1. Sharp filtered noise transient (wooden surface contact click)
+    const noise = ctx.createBufferSource()
+    noise.buffer = this.getNoiseBuffer(ctx)
 
-    osc.type = 'triangle'
-    osc.frequency.setValueAtTime(startFreq, startTime)
-    osc.frequency.exponentialRampToValueAtTime(endFreq, startTime + duration)
+    const bandpass = ctx.createBiquadFilter()
+    bandpass.type = 'bandpass'
+    bandpass.frequency.setValueAtTime(opts.clickFreq, startTime)
+    bandpass.Q.setValueAtTime(opts.clickQ, startTime)
 
-    gain.gain.setValueAtTime(0.001, startTime)
-    gain.gain.linearRampToValueAtTime(volume, startTime + 0.006)
-    gain.gain.exponentialRampToValueAtTime(0.001, startTime + duration)
+    const clickEnv = ctx.createGain()
+    clickEnv.gain.setValueAtTime(0.001, startTime)
+    clickEnv.gain.linearRampToValueAtTime(opts.clickGain, startTime + 0.002)
+    clickEnv.gain.exponentialRampToValueAtTime(
+      0.001,
+      startTime + opts.duration * 0.72,
+    )
 
-    osc.connect(gain)
-    gain.connect(ctx.destination)
+    noise.connect(bandpass)
+    bandpass.connect(clickEnv)
+    clickEnv.connect(ctx.destination)
 
-    osc.start(startTime)
-    osc.stop(startTime + duration + 0.01)
+    noise.start(startTime)
+    noise.stop(startTime + opts.duration)
+
+    // 2. Short damped wood cavity resonance (board thud)
+    const bodyOsc = ctx.createOscillator()
+    bodyOsc.type = 'sine'
+    bodyOsc.frequency.setValueAtTime(opts.bodyStartFreq, startTime)
+    bodyOsc.frequency.exponentialRampToValueAtTime(
+      opts.bodyEndFreq,
+      startTime + opts.duration,
+    )
+
+    const bodyEnv = ctx.createGain()
+    bodyEnv.gain.setValueAtTime(0.001, startTime)
+    bodyEnv.gain.linearRampToValueAtTime(opts.bodyGain, startTime + 0.003)
+    bodyEnv.gain.exponentialRampToValueAtTime(0.001, startTime + opts.duration)
+
+    bodyOsc.connect(bodyEnv)
+    bodyEnv.connect(ctx.destination)
+
+    bodyOsc.start(startTime)
+    bodyOsc.stop(startTime + opts.duration + 0.01)
   }
 
-  private playNoiseBurst(
-    ctx: AudioContext,
-    startTime: number,
-    duration: number,
-    volume: number,
-    filterFreq: number,
-  ): void {
-    const bufferSize = Math.floor(ctx.sampleRate * duration)
-    const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate)
-    const data = buffer.getChannelData(0)
-    for (let i = 0; i < bufferSize; i++) {
-      data[i] = (Math.random() * 2 - 1) * (1 - i / bufferSize)
-    }
-
-    const source = ctx.createBufferSource()
-    source.buffer = buffer
-
-    const filter = ctx.createBiquadFilter()
-    filter.type = 'bandpass'
-    filter.frequency.setValueAtTime(filterFreq, startTime)
-
-    const gain = ctx.createGain()
-    gain.gain.setValueAtTime(volume, startTime)
-    gain.gain.exponentialRampToValueAtTime(0.001, startTime + duration)
-
-    source.connect(filter)
-    filter.connect(gain)
-    gain.connect(ctx.destination)
-
-    source.start(startTime)
-  }
-
-  private playTone(
+  private playMarimbaNote(
     ctx: AudioContext,
     startTime: number,
     freq: number,
     duration: number,
     volume: number,
-    wave: OscillatorType,
   ): void {
     const osc = ctx.createOscillator()
+    const harmonic = ctx.createOscillator()
     const gain = ctx.createGain()
+    const harmGain = ctx.createGain()
 
-    osc.type = wave
+    osc.type = 'sine'
     osc.frequency.setValueAtTime(freq, startTime)
 
+    harmonic.type = 'sine'
+    harmonic.frequency.setValueAtTime(freq * 4, startTime)
+
     gain.gain.setValueAtTime(0.001, startTime)
-    gain.gain.linearRampToValueAtTime(volume, startTime + 0.012)
+    gain.gain.linearRampToValueAtTime(volume, startTime + 0.004)
     gain.gain.exponentialRampToValueAtTime(0.001, startTime + duration)
 
+    harmGain.gain.setValueAtTime(0.001, startTime)
+    harmGain.gain.linearRampToValueAtTime(volume * 0.18, startTime + 0.002)
+    harmGain.gain.exponentialRampToValueAtTime(
+      0.001,
+      startTime + duration * 0.25,
+    )
+
     osc.connect(gain)
+    harmonic.connect(harmGain)
+    harmGain.connect(gain)
     gain.connect(ctx.destination)
 
     osc.start(startTime)
+    harmonic.start(startTime)
     osc.stop(startTime + duration + 0.01)
+    harmonic.stop(startTime + duration * 0.3 + 0.01)
   }
 }
 
