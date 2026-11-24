@@ -62,6 +62,11 @@ import type {
   MaiaWorkerResponse,
 } from './engine/maiaWorker'
 import {
+  downloadFullStockfish,
+  isFullStockfishCached,
+  type StockfishFlavor,
+} from './engine/stockfishFullCache'
+import {
   formatEvaluationScore,
   INITIAL_EVALUATION,
   StockfishService,
@@ -430,6 +435,12 @@ export function App() {
   const [engineEnabled, setEngineEnabled] = useState<boolean>(true)
   const [engineMode, setEngineMode] = useState<EngineMode>('stockfish')
   const [engineDepth, setEngineDepth] = useState<12 | 15 | 18 | 20>(ENGINE_DEPTH)
+  const [sfFlavor, setSfFlavor] = useState<StockfishFlavor>('lite')
+  const [sfFullStatus, setSfFullStatus] = useState<
+    'idle' | 'downloading' | 'ready' | 'error'
+  >('idle')
+  const [sfFullProgress, setSfFullProgress] = useState<number>(0)
+  const [sfFullError, setSfFullError] = useState<string | null>(null)
   const [showBestMoveArrow, setShowBestMoveArrow] = useState<boolean>(true)
   const [sfEvaluation, setSfEvaluation] =
     useState<EngineEvaluation>(INITIAL_EVALUATION)
@@ -685,6 +696,11 @@ export function App() {
       }
     })
 
+    // Check if Stockfish 19 Full NNUE (94.5MB) was already downloaded & cached
+    void isFullStockfishCached().then((cached) => {
+      if (cached) setSfFullStatus('ready')
+    })
+
     return () => {
       service.destroy()
       engineRef.current = null
@@ -790,11 +806,22 @@ export function App() {
         uciHistory.length > 0
           ? `${basePos} moves ${uciHistory.join(' ')}`
           : basePos
+      service.setFlavor(sfFlavor)
       service.analyze(fen, engineDepth, multiPv, positionCmd)
     }, 45)
 
     return () => window.clearTimeout(timer)
-  }, [fen, needsStockfish, engineMode, engineDepth, startFen, moves, viewIndex, variation])
+  }, [
+    fen,
+    needsStockfish,
+    engineMode,
+    engineDepth,
+    sfFlavor,
+    startFen,
+    moves,
+    viewIndex,
+    variation,
+  ])
 
   // Fetch Lichess Cloud Eval (depth 30-60+) when in 'cloud' mode
   useEffect(() => {
@@ -929,6 +956,7 @@ export function App() {
             uciElo: activeBotPreset.uciElo,
             depth: activeBotPreset.depth ?? 10,
             movetimeMs: activeBotPreset.movetimeMs,
+            flavor: sfFlavor,
           },
           controller.signal,
         )
@@ -954,6 +982,7 @@ export function App() {
     activeBotPreset,
     maiaStatus,
     soundEnabled,
+    sfFlavor,
   ])
 
   const startBotMatch = (
@@ -1008,6 +1037,27 @@ export function App() {
     setMaiaError(null)
     const req: MaiaWorkerRequest = { type: 'download' }
     maiaWorkerRef.current?.postMessage(req)
+  }
+
+  const triggerFullStockfishDownload = async () => {
+    if (sfFullStatus === 'downloading') return
+    setSfFullError(null)
+    setSfFullStatus('downloading')
+    setSfFullProgress(0)
+    try {
+      await downloadFullStockfish((pct) => setSfFullProgress(pct))
+      setSfFullStatus('ready')
+      setSfFlavor('full')
+    } catch (err) {
+      setSfFullStatus('error')
+      setSfFullError(
+        err instanceof Error
+          ? err.message
+          : isEn
+            ? 'Failed to download Stockfish 19 Full NNUE.'
+            : 'Không thể tải Stockfish 19 Full NNUE.',
+      )
+    }
   }
 
   const activeMaiaResult: MaiaInferenceResult | null =
@@ -1333,6 +1383,7 @@ export function App() {
       let lastProgressUiMs = 0
       const result = await runFullGameReview(targetStartFen, targetMoves, {
         engineId,
+        stockfishFlavor: sfFlavor,
         lang,
         signal: controller.signal,
         onProgress: (completed, total) => {
@@ -3072,7 +3123,112 @@ export function App() {
                       <>
                         {/* Stockfish 19 MultiPV lines */}
                         {engineMode === 'stockfish' && (
-                          <div className="flex flex-col gap-1.5">
+                          <div className="flex flex-col gap-2">
+                            {/* NNUE Flavor Switcher: Lite (1.7MB) vs Full NNUE (94.5MB, on-demand) */}
+                            <div className="rounded-lg bg-[#262421] p-2.5 ring-1 ring-white/[0.06]">
+                              <div className="flex items-center justify-between gap-2">
+                                <span className="text-[11px] font-semibold text-stone-300">
+                                  {isEn
+                                    ? 'Stockfish 19 NNUE:'
+                                    : 'Phiên bản NNUE:'}
+                                </span>
+                                <div className="flex gap-1">
+                                  <button
+                                    type="button"
+                                    onClick={() => setSfFlavor('lite')}
+                                    className={[
+                                      'rounded px-2 py-0.5 text-[11px] font-bold transition',
+                                      sfFlavor === 'lite'
+                                        ? 'bg-[#81b64c] text-[#161512]'
+                                        : 'bg-[#1a1917] text-stone-400 hover:text-stone-200',
+                                    ].join(' ')}
+                                  >
+                                    Lite (1.7MB)
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      if (sfFullStatus === 'ready') {
+                                        setSfFlavor('full')
+                                      } else {
+                                        void triggerFullStockfishDownload()
+                                      }
+                                    }}
+                                    disabled={sfFullStatus === 'downloading'}
+                                    className={[
+                                      'rounded px-2 py-0.5 text-[11px] font-bold transition disabled:opacity-60',
+                                      sfFlavor === 'full'
+                                        ? 'bg-amber-400 text-[#161512]'
+                                        : 'bg-[#1a1917] text-amber-300 hover:bg-[#2f2d29]',
+                                    ].join(' ')}
+                                  >
+                                    {sfFullStatus === 'ready'
+                                      ? 'Full NNUE ★'
+                                      : sfFullStatus === 'downloading'
+                                        ? `${sfFullProgress}%`
+                                        : 'Full (94.5MB)'}
+                                  </button>
+                                </div>
+                              </div>
+
+                              {sfFullStatus === 'idle' && (
+                                <div className="mt-2 flex items-center justify-between gap-2 text-[10px] text-stone-400">
+                                  <span>
+                                    {isEn
+                                      ? 'Download Full Big NNUE (~3600+ Elo, cached once).'
+                                      : 'Tải Full Big NNUE (~3600+ Elo, lưu cache 1 lần).'}
+                                  </span>
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      void triggerFullStockfishDownload()
+                                    }
+                                    className="shrink-0 rounded bg-amber-500/20 px-2 py-1 font-bold text-amber-300 transition hover:bg-amber-500/30"
+                                  >
+                                    {isEn ? '⬇ Download' : '⬇ Tải ngay'}
+                                  </button>
+                                </div>
+                              )}
+
+                              {sfFullStatus === 'downloading' && (
+                                <div className="mt-2 flex flex-col gap-1">
+                                  <div className="flex justify-between text-[10px] text-stone-300">
+                                    <span>
+                                      {isEn
+                                        ? 'Downloading Stockfish 19 Full NNUE (94.5 MB)...'
+                                        : 'Đang tải Stockfish 19 Full NNUE (94.5 MB)...'}
+                                    </span>
+                                    <span className="font-mono font-bold text-amber-300">
+                                      {sfFullProgress}%
+                                    </span>
+                                  </div>
+                                  <div className="h-1.5 overflow-hidden rounded-full bg-[#1a1917]">
+                                    <div
+                                      className="h-full bg-amber-400 transition-[width] duration-150"
+                                      style={{ width: `${sfFullProgress}%` }}
+                                    />
+                                  </div>
+                                </div>
+                              )}
+
+                              {sfFullStatus === 'error' && (
+                                <div className="mt-1.5 flex items-center justify-between gap-2 text-[10px] text-red-300">
+                                  <span className="truncate">
+                                    {sfFullError ?? 'Download failed'}
+                                  </span>
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      void triggerFullStockfishDownload()
+                                    }
+                                    className="shrink-0 rounded bg-red-500/20 px-2 py-0.5 font-semibold text-red-200 hover:bg-red-500/30"
+                                  >
+                                    {isEn ? 'Retry' : 'Thử lại'}
+                                  </button>
+                                </div>
+                              )}
+                            </div>
+
                             <div className="mb-0.5 flex items-center justify-between gap-2">
                               <span className="text-[11px] font-semibold text-stone-400">
                                 {isEn

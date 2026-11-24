@@ -1,6 +1,10 @@
 import { Chess, DEFAULT_POSITION, type PieceSymbol, type Square } from 'chess.js'
 import { fetchLichessCloudEval } from './lichessCloudEval'
 import type { MaiaWorkerRequest, MaiaWorkerResponse } from './maiaWorker'
+import {
+  getStockfishWorkerUrl,
+  type StockfishFlavor,
+} from './stockfishFullCache'
 
 export type ReviewEngineId =
   | 'stockfish-12'
@@ -1635,14 +1639,23 @@ const DEFAULT_START_EVAL: PositionEval = {
   secondMate: null,
 }
 
-function getCachedEval(depth: number, fen: string): PositionEval | undefined {
+function getCachedEval(
+  flavor: StockfishFlavor,
+  depth: number,
+  fen: string,
+): PositionEval | undefined {
   const key = normalizeFenKey(fen)
   if (key === DEFAULT_START_KEY) return DEFAULT_START_EVAL
-  return fenEvalCache.get(`${depth}:${key}`)
+  return fenEvalCache.get(`${flavor}:${depth}:${key}`)
 }
 
-function setCachedEval(depth: number, fen: string, value: PositionEval): void {
-  const key = `${depth}:${normalizeFenKey(fen)}`
+function setCachedEval(
+  flavor: StockfishFlavor,
+  depth: number,
+  fen: string,
+  value: PositionEval,
+): void {
+  const key = `${flavor}:${depth}:${normalizeFenKey(fen)}`
   if (fenEvalCache.size >= MAX_EVAL_CACHE) {
     const oldest = fenEvalCache.keys().next().value
     if (oldest !== undefined) fenEvalCache.delete(oldest)
@@ -1896,12 +1909,14 @@ export async function runFullGameReview(
   moves: ReviewInputMove[],
   options: {
     engineId?: ReviewEngineId
+    stockfishFlavor?: StockfishFlavor
     lang?: 'vi' | 'en'
     signal: AbortSignal
     onProgress?: (completed: number, total: number) => void
   },
 ): Promise<GameReviewResult> {
   const engineId: ReviewEngineId = options.engineId ?? 'stockfish-12'
+  const sfFlavor: StockfishFlavor = options.stockfishFlavor ?? 'lite'
   const lang: 'vi' | 'en' = options.lang ?? 'vi'
   const engineMeta =
     REVIEW_ENGINES.find((e) => e.id === engineId) ?? REVIEW_ENGINES[0]
@@ -2091,7 +2106,7 @@ export async function runFullGameReview(
           evals[i] = { cp: 0, mate: null, bestMove: null }
           reportProgress()
         } else {
-          const cached = getCachedEval(sfDepth, snap.fen)
+          const cached = getCachedEval(sfFlavor, sfDepth, snap.fen)
           if (cached) {
             evals[i] = cached
             reportProgress()
@@ -2125,7 +2140,7 @@ export async function runFullGameReview(
                   secondMate: cloud.lines[1]?.mate ?? null,
                 }
                 evals[idx] = res
-                setCachedEval(sfDepth, snapshots[idx].fen, res)
+                setCachedEval(sfFlavor, sfDepth, snapshots[idx].fen, res)
                 reportProgress()
                 continue
               }
@@ -2140,15 +2155,16 @@ export async function runFullGameReview(
         sfQueue.push(...pendingIndices)
       }
 
-      // Pass 3: Parallel Stockfish 19 WASM Worker Pool (up to 4 concurrent workers)
-      // Splits work into contiguous chunks so each worker still benefits from TT/Hash reuse!
+      // Pass 3: Parallel Stockfish 19 WASM Worker Pool
+      // Cap Full NNUE (94.5MB/worker) at 2 workers to keep RAM safe; Lite NNUE uses up to 4 workers!
       if (sfQueue.length > 0) {
         const hwCores =
           typeof navigator !== 'undefined' && navigator.hardwareConcurrency
             ? navigator.hardwareConcurrency
             : 4
-        const poolSize = Math.min(4, Math.max(1, hwCores - 1), sfQueue.length)
-        const sfUrl = `${import.meta.env.BASE_URL}stockfish/stockfish-19-lite-single.js`
+        const maxPool = sfFlavor === 'full' ? 2 : 4
+        const poolSize = Math.min(maxPool, Math.max(1, hwCores - 1), sfQueue.length)
+        const sfUrl = getStockfishWorkerUrl(sfFlavor)
 
         for (let w = 0; w < poolSize; w++) {
           workers.push(new Worker(sfUrl))
@@ -2167,7 +2183,7 @@ export async function runFullGameReview(
                 throw new DOMException('Aborted', 'AbortError')
               }
               const snap = snapshots[idx]
-              const cached = getCachedEval(sfDepth, snap.fen)
+              const cached = getCachedEval(sfFlavor, sfDepth, snap.fen)
               if (cached) {
                 evals[idx] = cached
                 reportProgress()
@@ -2181,7 +2197,7 @@ export async function runFullGameReview(
                 signal,
               )
               evals[idx] = res
-              setCachedEval(sfDepth, snap.fen, res)
+              setCachedEval(sfFlavor, sfDepth, snap.fen, res)
               reportProgress()
             }
           }),

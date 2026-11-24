@@ -1,3 +1,8 @@
+import {
+  getStockfishWorkerUrl,
+  type StockfishFlavor,
+} from './stockfishFullCache'
+
 export type BotPresetId =
   | 'maia-1100'
   | 'maia-1300'
@@ -118,13 +123,23 @@ export const BOT_PRESETS: BotPreset[] = [
 
 // Persistent Stockfish Bot Worker so Hash/Transposition Table is preserved across moves
 let sharedBotWorker: Worker | null = null
+let sharedBotFlavor: StockfishFlavor = 'lite'
 let sharedBotReady = false
 
-function ensureBotWorker(): Worker {
+function ensureBotWorker(flavor: StockfishFlavor): Worker {
+  if (sharedBotWorker && sharedBotFlavor !== flavor) {
+    try {
+      sharedBotWorker.postMessage('quit')
+    } catch {
+      // Ignore
+    }
+    sharedBotWorker.terminate()
+    sharedBotWorker = null
+    sharedBotReady = false
+  }
   if (!sharedBotWorker) {
-    sharedBotWorker = new Worker(
-      `${import.meta.env.BASE_URL}stockfish/stockfish-19-lite-single.js`,
-    )
+    sharedBotFlavor = flavor
+    sharedBotWorker = new Worker(getStockfishWorkerUrl(flavor))
     sharedBotReady = false
   }
   return sharedBotWorker
@@ -147,6 +162,7 @@ export function getStockfishBotMove(
     uciElo?: number
     depth: number
     movetimeMs?: number
+    flavor?: StockfishFlavor
   },
   signal: AbortSignal,
 ): Promise<string | null> {
@@ -156,7 +172,7 @@ export function getStockfishBotMove(
       return
     }
 
-    const worker = ensureBotWorker()
+    const worker = ensureBotWorker(options.flavor ?? 'lite')
     const movetime = options.movetimeMs ?? 1000
 
     const configureAndSearch = () => {

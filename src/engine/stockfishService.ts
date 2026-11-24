@@ -1,3 +1,8 @@
+import {
+  getStockfishWorkerUrl,
+  type StockfishFlavor,
+} from './stockfishFullCache'
+
 export interface EngineLine {
   multipv: number
   cp: number | null
@@ -54,6 +59,7 @@ type EvalListener = (evaluation: EngineEvaluation) => void
 export class StockfishService {
   private worker: Worker | null = null
   private listener: EvalListener | null = null
+  private flavor: StockfishFlavor = 'lite'
   private isReady = false
   private isSearching = false
   private multiPv = 2
@@ -70,15 +76,59 @@ export class StockfishService {
   private lastEmitMs = 0
   private emitTimer: number | null = null
 
-  public start(onUpdate: EvalListener): void {
+  public start(
+    onUpdate: EvalListener,
+    flavor: StockfishFlavor = 'lite',
+  ): void {
     this.listener = onUpdate
-    if (this.worker) {
+    if (this.worker && this.flavor === flavor) {
       this.emit()
       return
     }
+    this.flavor = flavor
+    this.spawnWorker()
+  }
+
+  public setFlavor(flavor: StockfishFlavor): void {
+    if (this.flavor === flavor && this.worker) return
+    this.flavor = flavor
+    const savedPending = this.pendingSearch
+    this.teardownWorkerOnly()
+    this.pendingSearch = savedPending
+    this.spawnWorker()
+  }
+
+  private teardownWorkerOnly(): void {
+    if (this.emitTimer !== null) {
+      window.clearTimeout(this.emitTimer)
+      this.emitTimer = null
+    }
+    if (this.worker) {
+      try {
+        this.send('quit')
+      } catch {
+        // Ignore
+      }
+      this.worker.terminate()
+      this.worker = null
+    }
+    this.isReady = false
+    this.isSearching = false
+    this.lineMap.clear()
+  }
+
+  private spawnWorker(): void {
+    this.teardownWorkerOnly()
+    this.currentEval = {
+      ...INITIAL_EVALUATION,
+      isReady: false,
+      isSearching: false,
+      error: null,
+    }
+    this.emit()
 
     try {
-      const workerUrl = `${import.meta.env.BASE_URL}stockfish/stockfish-19-lite-single.js`
+      const workerUrl = getStockfishWorkerUrl(this.flavor)
       this.worker = new Worker(workerUrl)
       this.worker.onmessage = (event: MessageEvent<string>) => {
         const line = typeof event.data === 'string' ? event.data.trim() : ''
